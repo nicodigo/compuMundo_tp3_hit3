@@ -1,0 +1,29 @@
+# Local .terraform directories
+**/.terraform/
+
+# Terraform lock file (should not be committed for single-user, but can be)
+*.terraform.lock.hcl
+
+# .tfstate files
+*.tfstate
+*.tfstate.*
+
+# Crash log files
+crash.log
+crash.*.log
+
+# Override files (local overrides should not be checked in)
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Include override files you do wish to add to version control using negated pattern
+# !example_override.tf
+
+# .tfvars files — exclude all, then only whitelist the example
+*.tfvars
+!terraform.tfvars.example
+
+# Sensitive credentials
+!~/.gcp/

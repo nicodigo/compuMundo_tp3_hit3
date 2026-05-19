@@ -1,0 +1,18 @@
+# Terraform variables for Sobel Distributed Image Processing System
+# Copy this to terraform.tfvars and fill in your values.
+
+project_id            = "sobel-processing-YOUR_INITIALS"
+region                = "us-central1"
+# zones               = ["us-central1-a", "us-central1-b", "us-central1-c"]
+
+upload_bucket_name    = "sobel-uploads-YOUR_INITIALS"
+results_bucket_name   = "sobel-results-YOUR_INITIALS"
+
+worker_container_image = "gcr.io/sobel-processing-YOUR_INITIALS/worker:latest"
+# rabbitmq_host       = ""  # Fill after RabbitMQ LoadBalancer is provisioned
+
+rabbitmq_password     = "change-me-to-a-secure-password"
+redis_password        = "change-me-to-a-secure-password"
+
+# Optional: allow SSH to worker VMs for debugging
+# worker_allow_ssh    = true
