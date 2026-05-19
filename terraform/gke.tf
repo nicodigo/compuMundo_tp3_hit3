@@ -31,9 +31,6 @@ resource "google_container_cluster" "sobel_cluster" {
     enable_private_nodes = false
   }
 
-  # Allow any IP to reach the master (student project — restrict for production)
-  master_authorized_networks_config = []
-
   depends_on = [
     google_compute_subnetwork.sobel_subnet
   ]

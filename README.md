@@ -31,8 +31,9 @@ A scalable, cloud-native image processing platform that applies the Sobel edge-d
 
 1. **Create a new GCP project:**
    ```bash
-   gcloud projects create sobel-processing-$(whoami) --name="Sobel Processing"
-   gcloud config set project sobel-processing-$(whoami)
+   gcloud projects create sobel-processing-<YOUR_INITIALS> --name="Sobel Processing"
+   gcloud config set project sobel-processing-<YOUR_INITIALS>
+   PROJECT_ID=$(gcloud config get-value project)
    ```
 
 2. **Enable required APIs:**
@@ -48,24 +49,29 @@ A scalable, cloud-native image processing platform that applies the Sobel edge-d
    ```bash
    gcloud iam service-accounts create terraform-sa \
      --display-name="Terraform Service Account"
-   gcloud projects add-iam-policy-binding <YOUR_PROJECT_ID> \
-     --member="serviceAccount:terraform-sa@<YOUR_PROJECT_ID>.iam.gserviceaccount.com" \
+
+   gcloud projects add-iam-policy-binding $PROJECT_ID \
+     --member="serviceAccount:terraform-sa@$PROJECT_ID.iam.gserviceaccount.com" \
      --role="roles/container.admin"
-   gcloud projects add-iam-policy-binding <YOUR_PROJECT_ID> \
-     --member="serviceAccount:terraform-sa@<YOUR_PROJECT_ID>.iam.gserviceaccount.com" \
+
+   gcloud projects add-iam-policy-binding $PROJECT_ID \
+     --member="serviceAccount:terraform-sa@$PROJECT_ID.iam.gserviceaccount.com" \
      --role="roles/compute.admin"
-   gcloud projects add-iam-policy-binding <YOUR_PROJECT_ID> \
-     --member="serviceAccount:terraform-sa@<YOUR_PROJECT_ID>.iam.gserviceaccount.com" \
+
+   gcloud projects add-iam-policy-binding $PROJECT_ID \
+     --member="serviceAccount:terraform-sa@$PROJECT_ID.iam.gserviceaccount.com" \
      --role="roles/storage.admin"
-   gcloud projects add-iam-policy-binding <YOUR_PROJECT_ID> \
-     --member="serviceAccount:terraform-sa@<YOUR_PROJECT_ID>.iam.gserviceaccount.com" \
+
+   gcloud projects add-iam-policy-binding $PROJECT_ID \
+     --member="serviceAccount:terraform-sa@$PROJECT_ID.iam.gserviceaccount.com" \
      --role="roles/iam.serviceAccountUser"
    ```
 
 4. **Download the service account key:**
    ```bash
+   mkdir -p ~/.gcp
    gcloud iam service-accounts keys create ~/.gcp/sobel-terraform-key.json \
-     --iam-account=terraform-sa@<YOUR_PROJECT_ID>.iam.gserviceaccount.com
+     --iam-account="terraform-sa@$PROJECT_ID.iam.gserviceaccount.com"
    export GOOGLE_APPLICATION_CREDENTIALS=~/.gcp/sobel-terraform-key.json
    ```
 
@@ -81,31 +87,41 @@ A scalable, cloud-native image processing platform that applies the Sobel edge-d
    ```bash
    cd terraform
    cp terraform.tfvars.example terraform.tfvars
-   # Edit terraform.tfvars with your project_id and desired values
+   # Edit terraform.tfvars with your project_id, bucket names, passwords, and worker_container_image
    terraform init
    terraform plan -out=tfplan
    terraform apply tfplan
    cd ..
    ```
 
+   This creates the GKE cluster, VPC, GCS buckets, and the worker Managed Instance Group (initially scaled to zero).
+
 3. **Get cluster credentials:**
    ```bash
-   gcloud container clusters get-credentials sobel-cluster --region=<REGION>
+   gcloud container clusters get-credentials sobel-cluster --region=us-central1
    ```
 
 4. **Deploy infrastructure services:**
    ```bash
    kubectl apply -f kubernetes/namespaces.yaml
+
+   # Create secrets using the same passwords from terraform.tfvars
    kubectl create secret generic rabbitmq-secret \
-     --from-literal=rabbitmq-password=$(openssl rand -base64 12) -n infra
+     --from-literal=rabbitmq-password=$(terraform -chdir=terraform output -raw rabbitmq_password) \
+     -n infra
    kubectl create secret generic redis-secret \
-     --from-literal=redis-password=$(openssl rand -base64 12) -n infra
+     --from-literal=redis-password=$(terraform -chdir=terraform output -raw redis_password) \
+     -n infra
+
    kubectl apply -f kubernetes/rabbitmq-deployment.yaml
    kubectl apply -f kubernetes/redis-deployment.yaml
    ```
 
 5. **Deploy application services:**
    ```bash
+   # Edit kubernetes/configmaps-secrets.yaml first:
+   #   Replace <GCS_UPLOAD_BUCKET> and <GCS_RESULT_BUCKET> with your bucket names
+   kubectl apply -f kubernetes/configmaps-secrets.yaml
    kubectl apply -f kubernetes/backend-deployment.yaml
    kubectl apply -f kubernetes/split-deployment.yaml
    kubectl apply -f kubernetes/joiner-deployment.yaml
@@ -113,25 +129,19 @@ A scalable, cloud-native image processing platform that applies the Sobel edge-d
    kubectl apply -f kubernetes/dlq-monitor-deployment.yaml
    ```
 
-6. **Deploy worker VMs (Terraform):**
-   ```bash
-   cd terraform/workers
-   terraform init
-   terraform plan -out=tfplan
-   terraform apply tfplan
-   ```
-
-7. **Wait for pods to be ready:**
+6. **Wait for pods to be ready:**
    ```bash
    kubectl get pods -n infra -w
    kubectl get pods -n apps -w
    ```
 
-8. **Get the frontend URL:**
+7. **Get the frontend URL:**
    ```bash
    kubectl get svc frontend -n apps
    # Access the EXTERNAL-IP in your browser
    ```
+
+   > **Note:** Worker VMs are deployed as part of step 2 via the Managed Instance Group. They scale from zero automatically when the worker-autoscaler detects queued fragments.
 
 ## Accessing the System
 
@@ -213,15 +223,14 @@ User Browser
 ## Cleanup
 
 ```bash
-cd terraform/workers
-terraform destroy -auto-approve
+# Empty GCS buckets first (required before terraform can delete them)
+gsutil rm -r gs://<UPLOAD_BUCKET_NAME>
+gsutil rm -r gs://<RESULTS_BUCKET_NAME>
 
+# Destroy all infrastructure (cluster, VPC, buckets, worker MIG)
+cd terraform
+terraform destroy -auto-approve
 cd ..
-terraform destroy -auto-approve
-
-# GCS buckets must be emptied manually
-gsutil rm -r gs://sobel-uploads
-gsutil rm -r gs://sobel-results
 ```
 
 Optionally, delete the entire GCP project:

@@ -12,7 +12,7 @@ variable "region" {
 variable "zones" {
   type        = list(string)
   description = "GCP zones within the region"
-  default     = ["us-central1-a", "us-central1-b", "us-central1-c"]
+  default     = ["us-central1-a", "us-central1-b"]
 }
 
 variable "cluster_name" {
@@ -48,7 +48,7 @@ variable "app_machine_type" {
 
 variable "app_node_count" {
   type        = number
-  default     = 2
+  default     = 1
 }
 
 variable "app_node_max_count" {

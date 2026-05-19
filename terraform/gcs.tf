@@ -42,8 +42,9 @@ resource "google_service_account" "gcs_sa" {
 }
 
 resource "google_project_iam_member" "gcs_sa_storage" {
-  role   = "roles/storage.objectAdmin"
-  member = "serviceAccount:${google_service_account.gcs_sa.email}"
+  project = var.project_id
+  role    = "roles/storage.objectAdmin"
+  member  = "serviceAccount:${google_service_account.gcs_sa.email}"
 }
 
 # Service account key for GKE pods (mounted as a Kubernetes Secret).

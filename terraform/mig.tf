@@ -66,10 +66,10 @@ resource "google_compute_instance_template" "worker_template" {
     WORKER_ID="worker-$(hostname -s)"
 
     docker run -d --restart=unless-stopped --name sobel-worker \
-      -e RABBITMQ_URL="amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@${RABBITMQ_HOST}:${RABBITMQ_PORT}/" \
-      -e GCS_UPLOAD_BUCKET="${GCS_UPLOAD}" \
-      -e GCS_RESULT_BUCKET="${GCS_RESULT}" \
-      -e WORKER_ID="${WORKER_ID}" \
+      -e RABBITMQ_URL="amqp://$${RABBITMQ_USER}:$${RABBITMQ_PASSWORD}@$${RABBITMQ_HOST}:$${RABBITMQ_PORT}/" \
+      -e GCS_UPLOAD_BUCKET="$${GCS_UPLOAD}" \
+      -e GCS_RESULT_BUCKET="$${GCS_RESULT}" \
+      -e WORKER_ID="$${WORKER_ID}" \
       ${var.worker_container_image}
   EOF
 
@@ -97,7 +97,7 @@ resource "google_compute_region_instance_group_manager" "worker_mig" {
     type                  = "PROACTIVE"
     minimal_action        = "REPLACE"
     max_surge_fixed       = 2
-    max_unavailable_fixed = 1
+    max_unavailable_fixed = 2
   }
 
   auto_healing_policies {
