@@ -38,12 +38,14 @@ async def start_consumer(
                 image_id = payload["image_id"]
                 gcs_path = payload["gcs_path"]
 
-                # Extract bucket and blob name from gs:// URI
-                # Format: gs://bucket/blob_name
-                if gcs_path.startswith("gs://"):
-                    parts = gcs_path[5:].split("/", 1)
-                    upload_bucket = parts[0]
-                    blob_name = parts[1]
+                # Extract bucket and blob name from URI
+                # Format: gs://bucket/blob_name or local://bucket/blob_name
+                assert gcs_path.startswith("gs://") or gcs_path.startswith("local://"), \
+                    f"Unknown GCS path scheme: {gcs_path}"
+                prefix_end = gcs_path.index("://") + 3
+                parts = gcs_path[prefix_end:].split("/", 1)
+                upload_bucket = parts[0]
+                blob_name = parts[1]
                 else:
                     upload_bucket = settings.gcs_upload_bucket
                     blob_name = gcs_path

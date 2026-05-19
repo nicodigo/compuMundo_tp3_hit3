@@ -87,7 +87,9 @@ class RabbitMQManager:
                 self._channel = await self._connection.channel()
                 await self.declare_topology()
                 return
-            except (aio_pika.exceptions.AMQPConnectionError, OSError) as exc:
+            except (aio_pika.exceptions.AMQPConnectionError,
+                    aio_pika.exceptions.ChannelNotFoundEntity,
+                    OSError) as exc:
                 jitter = delay * random.uniform(-0.25, 0.25)
                 actual = delay + jitter
                 logger.warning(
@@ -116,44 +118,40 @@ class RabbitMQManager:
 
         # -- Exchanges (all durable, non-auto-delete) --
         self._exchanges["images"] = await channel.declare_exchange(
-            ExchangeName.IMAGES,
+            ExchangeName.IMAGES.value,
             type=aio_pika.ExchangeType.DIRECT,
             durable=True,
             auto_delete=False,
         )
         self._exchanges["fragments"] = await channel.declare_exchange(
-            ExchangeName.FRAGMENTS,
+            ExchangeName.FRAGMENTS.value,
             type=aio_pika.ExchangeType.DIRECT,
             durable=True,
             auto_delete=False,
         )
         self._exchanges["fragments_dlx"] = await channel.declare_exchange(
-            ExchangeName.FRAGMENTS_DLX,
+            ExchangeName.FRAGMENTS_DLX.value,
             type=aio_pika.ExchangeType.DIRECT,
             durable=True,
             auto_delete=False,
         )
         self._exchanges["results"] = await channel.declare_exchange(
-            ExchangeName.RESULTS,
+            ExchangeName.RESULTS.value,
             type=aio_pika.ExchangeType.FANOUT,
             durable=True,
             auto_delete=False,
         )
         self._exchanges["final"] = await channel.declare_exchange(
-            ExchangeName.FINAL,
+            ExchangeName.FINAL.value,
             type=aio_pika.ExchangeType.DIRECT,
             durable=True,
             auto_delete=False,
         )
 
-        # Ensure exchanges are committed before declaring queues and bindings.
-        # aio_pika robust channels may return DeclareOk before the exchange is
-        # fully visible in the vhost, causing queue.bind to fail with
-        # "no exchange 'sobel.images' in vhost '/'".
-        await asyncio.sleep(0.5)
+        # Give the broker a moment to commit the exchanges.
+        await asyncio.sleep(1.0)
 
         # -- Queues --
-
         # images.new
         q_images_new = await channel.declare_queue(
             QueueName.IMAGES_NEW,
@@ -208,17 +206,17 @@ class RabbitMQManager:
         self._queues["images.completed"] = q_images_completed
 
         # -- Bindings --
-        await q_images_new.bind(self._exchanges["images"], routing_key=RoutingKey.IMAGES_NEW)
+        await q_images_new.bind(ExchangeName.IMAGES.value, routing_key=RoutingKey.IMAGES_NEW.value)
         await q_fragments_pending.bind(
-            self._exchanges["fragments"], routing_key=RoutingKey.FRAGMENTS_PENDING
+            ExchangeName.FRAGMENTS.value, routing_key=RoutingKey.FRAGMENTS_PENDING.value
         )
         await q_fragments_dead.bind(
-            self._exchanges["fragments_dlx"], routing_key=RoutingKey.FRAGMENTS_DEAD
+            ExchangeName.FRAGMENTS_DLX.value, routing_key=RoutingKey.FRAGMENTS_DEAD.value
         )
-        await q_results_joiner.bind(self._exchanges["results"])
-        await q_results_dashboard.bind(self._exchanges["results"])
+        await q_results_joiner.bind(ExchangeName.RESULTS.value)
+        await q_results_dashboard.bind(ExchangeName.RESULTS.value)
         await q_images_completed.bind(
-            self._exchanges["final"], routing_key=RoutingKey.IMAGES_COMPLETED
+            ExchangeName.FINAL.value, routing_key=RoutingKey.IMAGES_COMPLETED.value
         )
 
         logger.info("RabbitMQ topology declared: %d exchanges, %d queues, %d bindings",
@@ -244,7 +242,7 @@ class RabbitMQManager:
             raise RuntimeError("Channel not initialized. Call connect() first.")
 
         exchange_obj = await self._channel.declare_exchange(
-            exchange,
+            exchange.value,
             type=aio_pika.ExchangeType.DIRECT if exchange != ExchangeName.RESULTS
             else aio_pika.ExchangeType.FANOUT,
             durable=True,
@@ -258,7 +256,7 @@ class RabbitMQManager:
                 content_type=content_type,
                 content_encoding="utf-8",
             ),
-            routing_key=routing_key,
+            routing_key=routing_key.value if isinstance(routing_key, RoutingKey) else routing_key,
             mandatory=False,
         )
 

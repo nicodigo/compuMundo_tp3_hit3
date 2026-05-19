@@ -7,8 +7,10 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
+import pathlib
+
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 from ..shared.config import Settings
 from ..shared.gcs_client import GCSClient
@@ -180,9 +182,9 @@ async def get_image_result(
         )
 
     result_gcs_path = meta.get("result_gcs_path", "")
-    # Extract blob name from gs://bucket/blob_name
-    if result_gcs_path.startswith("gs://"):
-        parts = result_gcs_path[5:].split("/", 1)
+    # Extract blob name from gs://bucket/blob_name or local://bucket/blob_name
+    if "://" in result_gcs_path:
+        parts = result_gcs_path.split("://", 1)[1].split("/", 1)
         blob_name = parts[1] if len(parts) > 1 else ""
     else:
         # Assume it's just a blob name within the result bucket
@@ -200,3 +202,19 @@ async def get_image_result(
         signed_url=signed_url,
         expires_in_minutes=15,
     )
+
+
+# ------------------------------------------------------------------
+# Local storage file server (dev only — serves /tmp/sobel-storage/)
+# ------------------------------------------------------------------
+
+LOCAL_STORAGE_ROOT = pathlib.Path("/tmp/sobel-storage")
+
+
+@router.get("/storage/{bucket}/{blob_name:path}")
+async def serve_local_file(bucket: str, blob_name: str):
+    """Serve a file from the local storage directory (dev mode)."""
+    file_path = LOCAL_STORAGE_ROOT / bucket / blob_name
+    if not file_path.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(file_path)

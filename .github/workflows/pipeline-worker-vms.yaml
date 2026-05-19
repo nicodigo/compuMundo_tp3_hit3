@@ -63,7 +63,9 @@ jobs:
 
       - name: Create instance template
         run: |
-          gcloud compute instance-templates create "worker-template-$(date +%s)" \
+          TEMPLATE_NAME="worker-template-$(date +%s)"
+          echo "TEMPLATE_NAME=$TEMPLATE_NAME" >> $GITHUB_ENV
+          gcloud compute instance-templates create "$TEMPLATE_NAME" \
             --machine-type=e2-small \
             --image-family=cos-stable \
             --image-project=cos-cloud \
@@ -94,7 +96,7 @@ jobs:
           gcloud compute instance-groups managed rolling-action start-update \
             "${{ vars.MIG_NAME }}" \
             --region="${{ vars.GCP_REGION }}" \
-            --version=template="worker-template-latest" \
+            --version=template="$TEMPLATE_NAME" \
             --type=proactive \
             --max-surge=2 \
             --max-unavailable=1 || echo "MIG update skipped (MIG may not exist yet)"

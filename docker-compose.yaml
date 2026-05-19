@@ -132,6 +132,8 @@ services:
         condition: service_healthy
 
   worker_autoscaler:
+    profiles:
+      - cloud
     build:
       context: .
       dockerfile: applications/worker_autoscaler/Dockerfile

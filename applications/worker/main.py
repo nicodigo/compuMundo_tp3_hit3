@@ -35,10 +35,11 @@ WORKER_ID: str = socket.gethostname()
 
 
 def _parse_gcs_uri(uri: str) -> tuple[str, str]:
-    """Parse gs://bucket/blob_name into (bucket, blob_name)."""
-    if uri.startswith("gs://"):
-        parts = uri[5:].split("/", 1)
-        return parts[0], parts[1]
+    """Parse gs://bucket/blob_name or local://bucket/blob_name into (bucket, blob_name)."""
+    for prefix in ("gs://", "local://"):
+        if uri.startswith(prefix):
+            parts = uri[len(prefix):].split("/", 1)
+            return parts[0], parts[1]
     raise ValueError(f"Invalid GCS URI: {uri}")
 
 

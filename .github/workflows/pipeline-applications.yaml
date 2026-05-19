@@ -54,6 +54,10 @@ jobs:
             --from-literal=GCS_SERVICE_ACCOUNT_KEY='${{ secrets.GCP_SA_KEY }}' \
             --dry-run=client -o yaml | kubectl apply -f -
 
+      - name: Replace PROJECT_ID placeholder in manifests
+        run: |
+          sed -i "s|gcr.io/PROJECT_ID/|gcr.io/$PROJECT_ID/|g" kubernetes/*-deployment.yaml
+
       - name: Update ConfigMap placeholders
         run: |
           UPLOAD_BUCKET="sobel-uploads-$PROJECT_ID"
