@@ -22,7 +22,7 @@ spec:
     spec:
       containers:
         - name: dlq-monitor
-          image: gcr.io/PROJECT_ID/dlq-monitor:latest
+          image: gcr.io/PROJECT_ID/dlq_monitor:latest
           ports:
             - name: http
               containerPort: 8000

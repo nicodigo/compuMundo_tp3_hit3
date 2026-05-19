@@ -14,7 +14,7 @@ from ..shared.config import Settings
 from ..shared.gcs_client import GCSClient
 from ..shared.rabbitmq import ExchangeName, RabbitMQManager, RoutingKey
 from ..shared.redis_client import RedisClient
-from .main import get_gcs, get_rabbitmq, get_redis, get_settings
+from .dependencies import get_gcs, get_rabbitmq, get_redis, get_settings
 from .models import (
     ErrorResponse,
     ImageResultResponse,

@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        service: [backend, split, joiner, frontend, dlq-monitor, worker-autoscaler]
+        service: [backend, split, joiner, frontend, dlq_monitor, worker_autoscaler]
     steps:
       - uses: actions/checkout@v4
       - uses: google-github-actions/auth@v2

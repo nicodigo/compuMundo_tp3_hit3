@@ -20,7 +20,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from ..shared.config import Settings, load_settings
+from ..shared.config import load_settings
 from ..shared.rabbitmq import QueueName, RabbitMQManager
 from ..shared.redis_client import RedisClient
 from ..shared.gcs_client import GCSClient
@@ -103,7 +103,8 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-app.mount("/static", StaticFiles(directory="static"), name="static")
+_static_dir = os.path.join(os.path.dirname(__file__), "static")
+app.mount("/static", StaticFiles(directory=_static_dir), name="static")
 
 
 @app.get("/health")

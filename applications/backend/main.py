@@ -10,22 +10,19 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from typing import Any
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
-from ..shared.config import Settings, load_settings
+from ..shared.config import load_settings
 from ..shared.rabbitmq import RabbitMQManager
 from ..shared.redis_client import RedisClient
 from ..shared.gcs_client import GCSClient
+from .dependencies import _state
 from .routes import router as api_router
 from .consumer import start_completion_consumer
 
 logger = logging.getLogger(__name__)
-
-# Module-level state (accessed via dependency injection functions)
-_state: dict[str, Any] = {}
 
 
 @asynccontextmanager
@@ -88,21 +85,3 @@ async def ready():
         return JSONResponse(status_code=503, content={"status": "not ready"})
     except Exception:
         return JSONResponse(status_code=503, content={"status": "not ready"})
-
-
-# ---- Dependency injection helpers ----
-
-def get_rabbitmq() -> RabbitMQManager:
-    return _state["rabbitmq"]
-
-
-def get_redis() -> RedisClient:
-    return _state["redis"]
-
-
-def get_gcs() -> GCSClient:
-    return _state["gcs"]
-
-
-def get_settings() -> Settings:
-    return _state["settings"]

@@ -108,11 +108,11 @@ services:
       backend:
         condition: service_started
 
-  dlq-monitor:
+  dlq_monitor:
     build:
       context: .
-      dockerfile: applications/dlq-monitor/Dockerfile
-    container_name: sobel-dlq-monitor
+      dockerfile: applications/dlq_monitor/Dockerfile
+    container_name: sobel-dlq_monitor
     environment:
       <<: *common-env
     depends_on:
@@ -131,11 +131,11 @@ services:
       rabbitmq:
         condition: service_healthy
 
-  worker-autoscaler:
+  worker_autoscaler:
     build:
       context: .
-      dockerfile: applications/worker-autoscaler/Dockerfile
-    container_name: sobel-worker-autoscaler
+      dockerfile: applications/worker_autoscaler/Dockerfile
+    container_name: sobel-worker_autoscaler
     environment:
       RABBITMQ_MGMT_URL: http://rabbitmq:15672
       RABBITMQ_DEFAULT_USER: guest

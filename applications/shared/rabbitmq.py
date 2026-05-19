@@ -146,6 +146,12 @@ class RabbitMQManager:
             auto_delete=False,
         )
 
+        # Ensure exchanges are committed before declaring queues and bindings.
+        # aio_pika robust channels may return DeclareOk before the exchange is
+        # fully visible in the vhost, causing queue.bind to fail with
+        # "no exchange 'sobel.images' in vhost '/'".
+        await asyncio.sleep(0.5)
+
         # -- Queues --
 
         # images.new
