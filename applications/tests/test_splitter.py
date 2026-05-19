@@ -58,8 +58,8 @@ def test_fragments_are_valid_png():
 
 
 def test_rejects_non_divisible_dimensions():
-    """A 100x100 image with grid=4 must raise ValueError."""
-    data = _make_test_image(100, 100)
+    """A 103x103 image with grid=4 must raise ValueError."""
+    data = _make_test_image(103, 103)
     try:
         split_image(data, grid_size=4)
         assert False, "Should have raised ValueError"
