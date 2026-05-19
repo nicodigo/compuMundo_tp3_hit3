@@ -1,0 +1,106 @@
+---
+# Joiner Deployment — consumes completed fragments, reassembles final image
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: joiner
+  namespace: apps
+  labels:
+    app: joiner
+    component: processor
+    environment: production
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: joiner
+  template:
+    metadata:
+      labels:
+        app: joiner
+        component: processor
+    spec:
+      containers:
+        - name: joiner
+          image: gcr.io/PROJECT_ID/joiner:latest
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: sobel-config
+          env:
+            - name: RABBITMQ_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: rabbitmq-secret
+                  key: rabbitmq-password
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: redis-secret
+                  key: redis-password
+            - name: GCS_SERVICE_ACCOUNT_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: sobel-secrets
+                  key: GCS_SERVICE_ACCOUNT_KEY
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 15
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8000
+            periodSeconds: 10
+            failureThreshold: 2
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+---
+# Service: ClusterIP — internal (health checks, metrics)
+apiVersion: v1
+kind: Service
+metadata:
+  name: joiner
+  namespace: apps
+  labels:
+    app: joiner
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+  selector:
+    app: joiner
+---
+# HPA: CPU-driven autoscaling
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: joiner
+  namespace: apps
+  labels:
+    app: joiner
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: joiner
+  minReplicas: 1
+  maxReplicas: 4
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70

@@ -1,0 +1,153 @@
+version: "3.9"
+
+services:
+  # ============================================================
+  # Infrastructure
+  # ============================================================
+  rabbitmq:
+    image: rabbitmq:3.12-management-alpine
+    container_name: sobel-rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    healthcheck:
+      test: rabbitmq-diagnostics status
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: sobel-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --requirepass redispass --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "redispass", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ============================================================
+  # Application Services
+  # ============================================================
+  backend:
+    build:
+      context: .
+      dockerfile: applications/backend/Dockerfile
+    container_name: sobel-backend
+    ports:
+      - "8001:8000"
+    environment: &common-env
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_VHOST: "/"
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_PASSWORD: guest
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_DB: "0"
+      REDIS_PASSWORD: redispass
+      GCS_UPLOAD_BUCKET: sobel-uploads
+      GCS_RESULT_BUCKET: sobel-results
+      GCS_SERVICE_ACCOUNT_KEY: "{}"
+      FRAGMENT_GRID_SIZE: "4"
+      FRAGMENT_TTL_MS: "30000"
+      MAX_RETRIES: "3"
+      LOG_LEVEL: DEBUG
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  split:
+    build:
+      context: .
+      dockerfile: applications/split/Dockerfile
+    container_name: sobel-split
+    environment:
+      <<: *common-env
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  joiner:
+    build:
+      context: .
+      dockerfile: applications/joiner/Dockerfile
+    container_name: sobel-joiner
+    environment:
+      <<: *common-env
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: .
+      dockerfile: applications/frontend/Dockerfile
+    container_name: sobel-frontend
+    ports:
+      - "8000:8000"
+    environment:
+      <<: *common-env
+      BACKEND_URL: http://backend:8000
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_started
+
+  dlq-monitor:
+    build:
+      context: .
+      dockerfile: applications/dlq-monitor/Dockerfile
+    container_name: sobel-dlq-monitor
+    environment:
+      <<: *common-env
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: .
+      dockerfile: applications/worker/Dockerfile
+    container_name: sobel-worker
+    environment:
+      <<: *common-env
+    deploy:
+      replicas: 2
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  worker-autoscaler:
+    build:
+      context: .
+      dockerfile: applications/worker-autoscaler/Dockerfile
+    container_name: sobel-worker-autoscaler
+    environment:
+      RABBITMQ_MGMT_URL: http://rabbitmq:15672
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_PASSWORD: guest
+      MIG_PROJECT: local-dev
+      MIG_REGION: local-dev
+      MIG_NAME: local-dev
+      MAX_WORKERS: "10"
+      MIN_WORKERS: "0"
+      WORKER_FRAGMENT_CAPACITY: "8"
+      POLL_INTERVAL_SECS: "30"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy

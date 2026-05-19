@@ -1,0 +1,18 @@
+---
+# Namespace: Infrastructure services (RabbitMQ, Redis)
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: infra
+  labels:
+    name: infra
+    environment: production
+---
+# Namespace: Application services (backend, split, joiner, frontend, dlq-monitor)
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: apps
+  labels:
+    name: apps
+    environment: production

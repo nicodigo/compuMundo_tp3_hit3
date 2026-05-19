@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sobel Edge Detection</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="card">
+        <h1>Sobel Edge Detection</h1>
+        <p class="subtitle">Upload a PNG image for distributed edge detection</p>
+
+        <div class="upload-section">
+            <input
+                type="file"
+                id="upload-input"
+                accept=".png,image/png"
+            />
+            <button id="upload-btn" disabled>Upload</button>
+        </div>
+
+        <div id="error" class="error" hidden></div>
+
+        <div id="status-section" hidden>
+            <div id="status" class="status-text">Waiting...</div>
+            <div id="progress-bar" class="progress-bar">
+                <div id="progress-fill" class="progress-fill" style="width: 0%"></div>
+            </div>
+            <div id="progress-label" class="progress-label">0 / 16 fragments</div>
+        </div>
+
+        <div id="result-section" hidden>
+            <a id="download-link" class="download-link" href="#">Download Result</a>
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

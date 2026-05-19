@@ -1,0 +1,79 @@
+name: Pipeline — Applications
+
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["Pipeline — Infrastructure Services"]
+    types: [completed]
+
+env:
+  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  GCR_HOST: gcr.io
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [backend, split, joiner, frontend, dlq-monitor, worker-autoscaler]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+      - name: Configure Docker for GCR
+        run: gcloud auth configure-docker "$GCR_HOST" --quiet
+      - name: Build and push
+        run: |
+          IMAGE="$GCR_HOST/$PROJECT_ID/${{ matrix.service }}:${{ github.sha }}"
+          docker build \
+            -f "applications/${{ matrix.service }}/Dockerfile" \
+            -t "$IMAGE" \
+            -t "$GCR_HOST/$PROJECT_ID/${{ matrix.service }}:latest" \
+            .
+          docker push "$IMAGE"
+          docker push "$GCR_HOST/$PROJECT_ID/${{ matrix.service }}:latest"
+
+  deploy-apps:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+      - uses: google-github-actions/get-gke-credentials@v2
+        with:
+          cluster_name: ${{ vars.GKE_CLUSTER_NAME }}
+          location: ${{ vars.GCP_REGION }}
+
+      - name: Create GCS secret
+        run: |
+          kubectl create secret generic sobel-secrets \
+            --namespace=apps \
+            --from-literal=GCS_SERVICE_ACCOUNT_KEY='${{ secrets.GCP_SA_KEY }}' \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Update ConfigMap placeholders
+        run: |
+          UPLOAD_BUCKET="sobel-uploads-$PROJECT_ID"
+          RESULT_BUCKET="sobel-results-$PROJECT_ID"
+          kubectl patch configmap sobel-config -n apps --type merge \
+            -p "{\"data\":{\"GCS_UPLOAD_BUCKET\":\"$UPLOAD_BUCKET\",\"GCS_RESULT_BUCKET\":\"$RESULT_BUCKET\"}}"
+
+      - name: Deploy Backend
+        run: kubectl apply -f kubernetes/backend-deployment.yaml
+      - name: Deploy Split
+        run: kubectl apply -f kubernetes/split-deployment.yaml
+      - name: Deploy Joiner
+        run: kubectl apply -f kubernetes/joiner-deployment.yaml
+      - name: Deploy Frontend
+        run: kubectl apply -f kubernetes/frontend-deployment.yaml
+      - name: Deploy DLQ Monitor
+        run: kubectl apply -f kubernetes/dlq-monitor-deployment.yaml
+
+      - name: Wait for deployments
+        run: |
+          for svc in backend split joiner frontend dlq-monitor; do
+            kubectl rollout status deployment/"$svc" -n apps --timeout=120s
+          done

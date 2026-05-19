@@ -1,0 +1,136 @@
+---
+# RabbitMQ StatefulSet — single-node, no clustering, no SSL
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: rabbitmq
+  namespace: infra
+  labels:
+    app: rabbitmq
+    component: messaging
+    environment: production
+spec:
+  serviceName: rabbitmq-headless
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rabbitmq
+  template:
+    metadata:
+      labels:
+        app: rabbitmq
+        component: messaging
+    spec:
+      tolerations:
+        - key: "dedicated"
+          operator: "Equal"
+          value: "infra"
+          effect: "NoSchedule"
+      nodeSelector:
+        pool: infra
+      containers:
+        - name: rabbitmq
+          image: rabbitmq:3.12-management-alpine
+          ports:
+            - name: amqp
+              containerPort: 5672
+            - name: management
+              containerPort: 15672
+          env:
+            - name: RABBITMQ_DEFAULT_USER
+              value: "guest"
+            - name: RABBITMQ_DEFAULT_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: rabbitmq-secret
+                  key: rabbitmq-password
+          livenessProbe:
+            exec:
+              command: ["rabbitmq-diagnostics", "status"]
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command: ["rabbitmq-diagnostics", "check_port_connectivity"]
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: 500m
+              memory: 1Gi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/rabbitmq
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi
+---
+# Service: ClusterIP — internal amqp + management
+apiVersion: v1
+kind: Service
+metadata:
+  name: rabbitmq
+  namespace: infra
+  labels:
+    app: rabbitmq
+spec:
+  type: ClusterIP
+  ports:
+    - name: amqp
+      port: 5672
+      targetPort: 5672
+    - name: management
+      port: 15672
+      targetPort: 15672
+  selector:
+    app: rabbitmq
+---
+# Service: LoadBalancer — amqp access for external worker VMs
+apiVersion: v1
+kind: Service
+metadata:
+  name: rabbitmq-lb
+  namespace: infra
+  labels:
+    app: rabbitmq
+spec:
+  type: LoadBalancer
+  ports:
+    - name: amqp
+      port: 5672
+      targetPort: 5672
+  loadBalancerSourceRanges:
+    - "10.0.0.0/16"
+  selector:
+    app: rabbitmq
+---
+# Service: Headless — for RabbitMQ clustering (reserved, not used with single-node)
+apiVersion: v1
+kind: Service
+metadata:
+  name: rabbitmq-headless
+  namespace: infra
+  labels:
+    app: rabbitmq
+spec:
+  type: ClusterIP
+  clusterIP: None
+  ports:
+    - name: epmd
+      port: 4369
+      targetPort: 4369
+    - name: clustering
+      port: 25672
+      targetPort: 25672
+  selector:
+    app: rabbitmq

@@ -1,0 +1,2 @@
+aiohttp>=3.9,<4
+google-cloud-compute>=1.18,<2

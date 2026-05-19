@@ -1,0 +1,100 @@
+name: Pipeline — Worker VMs
+
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["Pipeline — Applications"]
+    types: [completed]
+
+env:
+  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  GCR_HOST: gcr.io
+
+jobs:
+  build-worker-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+      - name: Configure Docker for GCR
+        run: gcloud auth configure-docker "$GCR_HOST" --quiet
+      - name: Build and push worker image
+        run: |
+          IMAGE="$GCR_HOST/$PROJECT_ID/worker:${{ github.sha }}"
+          docker build \
+            -f applications/worker/Dockerfile \
+            -t "$IMAGE" \
+            -t "$GCR_HOST/$PROJECT_ID/worker:latest" \
+            .
+          docker push "$IMAGE"
+          docker push "$GCR_HOST/$PROJECT_ID/worker:latest"
+
+  provision-mig:
+    needs: build-worker-image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+      - name: Get GKE credentials
+        run: |
+          gcloud container clusters get-credentials "${{ vars.GKE_CLUSTER_NAME }}" \
+            --region "${{ vars.GCP_REGION }}"
+      - name: Discover RabbitMQ LB IP
+        run: |
+          RABBIT_LB_IP=$(kubectl get svc rabbitmq-lb -n infra \
+            -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+          echo "RABBITMQ_EXTERNAL_IP=$RABBIT_LB_IP" >> $GITHUB_ENV
+
+      - name: Get RabbitMQ password
+        run: |
+          RABBIT_PW=$(kubectl get secret rabbitmq-secret -n infra \
+            -o jsonpath='{.data.rabbitmq-password}' | base64 -d)
+          echo "RABBITMQ_PW=$RABBIT_PW" >> $GITHUB_ENV
+
+      - name: Get Redis password
+        run: |
+          REDIS_PW=$(kubectl get secret redis-secret -n infra \
+            -o jsonpath='{.data.redis-password}' | base64 -d)
+          echo "REDIS_PW=$REDIS_PW" >> $GITHUB_ENV
+
+      - name: Create instance template
+        run: |
+          gcloud compute instance-templates create "worker-template-$(date +%s)" \
+            --machine-type=e2-small \
+            --image-family=cos-stable \
+            --image-project=cos-cloud \
+            --metadata=startup-script="
+              docker run -d --restart=always \
+                --name sobel-worker \
+                -e RABBITMQ_HOST=$RABBITMQ_EXTERNAL_IP \
+                -e RABBITMQ_PORT=5672 \
+                -e RABBITMQ_VHOST=/ \
+                -e RABBITMQ_DEFAULT_USER=guest \
+                -e RABBITMQ_PASSWORD=$RABBITMQ_PW \
+                -e REDIS_HOST=redis.infra.svc.cluster.local \
+                -e REDIS_PORT=6379 \
+                -e REDIS_DB=0 \
+                -e REDIS_PASSWORD=$REDIS_PW \
+                -e GCS_UPLOAD_BUCKET=sobel-uploads-$PROJECT_ID \
+                -e GCS_RESULT_BUCKET=sobel-results-$PROJECT_ID \
+                -e GCS_SERVICE_ACCOUNT_KEY='${{ secrets.GCP_SA_KEY }}' \
+                -e FRAGMENT_GRID_SIZE=4 \
+                -e FRAGMENT_TTL_MS=30000 \
+                -e MAX_RETRIES=3 \
+                -e LOG_LEVEL=INFO \
+                $GCR_HOST/$PROJECT_ID/worker:latest
+            "
+
+      - name: Rollout MIG update
+        run: |
+          gcloud compute instance-groups managed rolling-action start-update \
+            "${{ vars.MIG_NAME }}" \
+            --region="${{ vars.GCP_REGION }}" \
+            --version=template="worker-template-latest" \
+            --type=proactive \
+            --max-surge=2 \
+            --max-unavailable=1 || echo "MIG update skipped (MIG may not exist yet)"

@@ -1,0 +1,59 @@
+name: Pipeline — Infrastructure Services
+
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["Pipeline — K8s Provisioning"]
+    types: [completed]
+
+jobs:
+  deploy-infra:
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+      - uses: google-github-actions/get-gke-credentials@v2
+        with:
+          cluster_name: ${{ vars.GKE_CLUSTER_NAME }}
+          location: ${{ vars.GCP_REGION }}
+
+      - name: Apply namespaces
+        run: kubectl apply -f kubernetes/namespaces.yaml
+
+      - name: Create RabbitMQ password
+        run: |
+          RABBIT_PW=$(openssl rand -hex 16)
+          for ns in infra apps; do
+            kubectl create secret generic rabbitmq-secret \
+              --namespace="$ns" \
+              --from-literal=rabbitmq-password="$RABBIT_PW" \
+              --dry-run=client -o yaml | kubectl apply -f -
+          done
+
+      - name: Create Redis password
+        run: |
+          REDIS_PW=$(openssl rand -hex 16)
+          for ns in infra apps; do
+            kubectl create secret generic redis-secret \
+              --namespace="$ns" \
+              --from-literal=redis-password="$REDIS_PW" \
+              --dry-run=client -o yaml | kubectl apply -f -
+          done
+
+      - name: Apply ConfigMap
+        run: kubectl apply -f kubernetes/configmaps-secrets.yaml
+
+      - name: Deploy RabbitMQ
+        run: kubectl apply -f kubernetes/rabbitmq-deployment.yaml
+
+      - name: Deploy Redis
+        run: kubectl apply -f kubernetes/redis-deployment.yaml
+
+      - name: Wait for RabbitMQ
+        run: kubectl wait --for=condition=ready pod -l app=rabbitmq -n infra --timeout=180s
+
+      - name: Wait for Redis
+        run: kubectl wait --for=condition=ready pod -l app=redis -n infra --timeout=120s
