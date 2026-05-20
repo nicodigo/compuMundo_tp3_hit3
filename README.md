@@ -38,16 +38,29 @@ This section is a high-level summary.
 ### 1. GCP Project Setup
 
 ```bash
+gcloud auth login
+gcloud auth application-default login
+
 export PROJECT_ID="sobel-processing-YOUR_INITIALS"
 gcloud projects create "$PROJECT_ID" --name="Sobel Processing"
 gcloud config set project "$PROJECT_ID"
-gcloud config set compute/region us-central1
+gcloud auth application-default set-quota-project "$PROJECT_ID"
 
+# Link billing (required before enabling APIs)
+gcloud billing projects link "$PROJECT_ID" --billing-account="BILLING_ACCOUNT_ID"
+
+# Enable all required APIs
 gcloud services enable container.googleapis.com
 gcloud services enable compute.googleapis.com
 gcloud services enable storage.googleapis.com
 gcloud services enable monitoring.googleapis.com
 gcloud services enable iamcredentials.googleapis.com
+gcloud services enable iam.googleapis.com
+gcloud services enable cloudresourcemanager.googleapis.com
+
+# Set defaults (after APIs are enabled)
+gcloud config set compute/region us-central1
+gcloud config set compute/zone us-central1-a
 ```
 
 ### 2. Create a Terraform Service Account
@@ -71,7 +84,13 @@ gcloud projects add-iam-policy-binding "$PROJECT_ID" \
   --role="roles/iam.serviceAccountUser"
 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
   --member="serviceAccount:${SA_EMAIL}" \
+  --role="roles/iam.serviceAccountAdmin"
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${SA_EMAIL}" \
   --role="roles/iam.serviceAccountKeyAdmin"
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${SA_EMAIL}" \
+  --role="roles/resourcemanager.projectIamAdmin"
 
 mkdir -p ~/.gcp
 gcloud iam service-accounts keys create ~/.gcp/sobel-terraform-key.json \
@@ -140,18 +159,17 @@ kubectl apply -f kubernetes/redis-deployment.yaml
 kubectl wait --for=condition=ready pod -l app=rabbitmq -n infra --timeout=300s
 kubectl wait --for=condition=ready pod -l app=redis -n infra --timeout=300s
 
-# Application services (replace image placeholder first)
-sed -i "s|gcr.io/PROJECT_ID/|gcr.io/${PROJECT_ID}/|g" kubernetes/*-deployment.yaml
-kubectl apply -f kubernetes/backend-deployment.yaml
-kubectl apply -f kubernetes/split-deployment.yaml
-kubectl apply -f kubernetes/joiner-deployment.yaml
-kubectl apply -f kubernetes/frontend-deployment.yaml
-kubectl apply -f kubernetes/dlq-monitor-deployment.yaml
+# Application services (uses Kustomize — no sed -i on source files)
+sed -i "s|REPLACE_PROJECT_ID|${PROJECT_ID}|g" kubernetes/kustomization.yaml
+kubectl apply -k kubernetes/
 
 # Wait for deployments
-for svc in backend split joiner frontend dlq-monitor; do
+for svc in backend split joiner frontend dlq-monitor worker-autoscaler; do
   kubectl rollout status deployment/"${svc}" -n apps --timeout=120s
 done
+
+# Revert kustomization.yaml (optional)
+git checkout kubernetes/kustomization.yaml
 
 # Get frontend IP
 kubectl get svc frontend -n apps

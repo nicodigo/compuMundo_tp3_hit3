@@ -175,22 +175,29 @@ openssl version
 
 ## 3. GCP Project Setup
 
-### 3.1 Log in and set your account
+### 3.1 Log in to your Google account
 
-**WHAT**: Authenticate with Google Cloud so subsequent commands know
-who you are.
-**WHY**: All GCP operations require authentication.
+**WHAT**: Authenticate with your Google Cloud account.
+**WHY**: All gcloud operations require authentication.
 
 ```bash
 gcloud auth login
 # A browser window opens. Log in with your GCP account.
-
-gcloud auth application-default login
-# Also needed for Terraform to authenticate directly.
-# A browser window opens again. Log in.
 ```
 
-### 3.2 Create a GCP Project
+### 3.2 Set up Application Default Credentials (ADC)
+
+**WHAT**: Authenticate for programmatic access used by Terraform.
+**WHY**: Terraform (and other SDK tools) use ADC instead of your personal
+gcloud login session. This must run BEFORE creating the project so ADC is
+ready when Terraform needs it.
+
+```bash
+gcloud auth application-default login
+# A browser window opens again. Log in with the same account.
+```
+
+### 3.3 Create a GCP Project
 
 **WHAT**: Create a new GCP project that isolates resources and billing.
 **WHY**: A clean project avoids conflicts with existing resources and makes
@@ -202,39 +209,31 @@ cleanup easier.
 export PROJECT_ID="sobel-processing-YOUR_INITIALS"
 
 gcloud projects create "$PROJECT_ID" --name="Sobel Processing"
+```
 
-# Set this as the active project for all subsequent gcloud commands
+### 3.4 Set the active project
+
+**WHAT**: Tell gcloud which project to target.
+**WHY**: Without this, every gcloud command must include `--project=`.
+Setting it once avoids typos and mismatch errors.
+
+```bash
 gcloud config set project "$PROJECT_ID"
-gcloud config set compute/region us-central1
-gcloud config set compute/zone us-central1-a
 
 # Verify
 gcloud config get-value project
 # Expected output: sobel-processing-YOUR_INITIALS
+
+# Prevent "quota project" mismatch warnings from ADC
+gcloud auth application-default set-quota-project "$PROJECT_ID"
 ```
 
-### 3.3 Enable Required APIs
+### 3.5 Link billing
 
-**WHAT**: Turn on the GCP services this project needs.
-**WHY**: By default, APIs are disabled. Terraform and kubectl commands
-will fail with "API not enabled" errors if these are off.
-
-```bash
-gcloud services enable container.googleapis.com
-gcloud services enable compute.googleapis.com
-gcloud services enable storage.googleapis.com
-gcloud services enable monitoring.googleapis.com
-gcloud services enable iamcredentials.googleapis.com
-```
-
-> **Note**: The correct Cloud Storage API name is `storage.googleapis.com`,
-> not `storage-component.googleapis.com`.
-
-### 3.4 Link billing (if not already)
-
-**WHAT**: Your project needs an active billing account.
+**WHAT**: Attach a billing account to the project.
 **WHY**: GKE clusters and Compute Engine VMs are not free-tier resources;
-they consume credits or real money.
+they consume credits or real money. Billing must be active before enabling
+APIs.
 
 ```bash
 # List your billing accounts
@@ -244,6 +243,43 @@ gcloud billing accounts list
 # Replace BILLING_ACCOUNT_ID with the ID from the list above
 gcloud billing projects link "$PROJECT_ID" \
   --billing-account="BILLING_ACCOUNT_ID"
+```
+
+### 3.6 Enable Required APIs
+
+**WHAT**: Turn on all GCP services this project needs.
+**WHY**: By default, APIs are disabled. Terraform and kubectl commands
+will fail with "API not enabled" errors if these are off. Billing must
+already be linked (step 3.5) before APIs can be enabled.
+
+```bash
+gcloud services enable container.googleapis.com
+gcloud services enable compute.googleapis.com
+gcloud services enable storage.googleapis.com
+gcloud services enable monitoring.googleapis.com
+gcloud services enable iamcredentials.googleapis.com
+gcloud services enable iam.googleapis.com
+gcloud services enable cloudresourcemanager.googleapis.com
+```
+
+> **Why these 7 APIs**: `container.googleapis.com` for GKE,
+> `compute.googleapis.com` for Compute Engine (MIG, VMs, firewalls),
+> `storage.googleapis.com` for Cloud Storage buckets,
+> `monitoring.googleapis.com` for Cloud Monitoring,
+> `iamcredentials.googleapis.com` for service account key creation,
+> `iam.googleapis.com` for service account management,
+> `cloudresourcemanager.googleapis.com` for project-level IAM bindings.
+
+### 3.7 Set compute defaults
+
+**WHAT**: Set default region and zone for Compute Engine resources.
+**WHY**: Do this AFTER enabling the compute API (step 3.6) — setting
+compute configuration before the API is enabled can cause unexpected
+behavior.
+
+```bash
+gcloud config set compute/region us-central1
+gcloud config set compute/zone us-central1-a
 ```
 
 ---
@@ -272,6 +308,8 @@ export SA_EMAIL="terraform-sa@${PROJECT_ID}.iam.gserviceaccount.com"
 infrastructure.
 **WHY**: Without these roles, Terraform calls to create the VPC, GKE
 cluster, GCS buckets, and MIG will fail with "permission denied" errors.
+Terraform also needs permission to create service accounts and assign
+them project-level IAM roles.
 
 ```bash
 # Full control over GKE clusters (create, update, delete)
@@ -294,10 +332,21 @@ gcloud projects add-iam-policy-binding "$PROJECT_ID" \
   --member="serviceAccount:${SA_EMAIL}" \
   --role="roles/iam.serviceAccountUser"
 
+# Service Account Admin — needed to create the GCS access SA
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${SA_EMAIL}" \
+  --role="roles/iam.serviceAccountAdmin"
+
 # Service Account Key Admin — needed to create the GCS access SA key
 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
   --member="serviceAccount:${SA_EMAIL}" \
   --role="roles/iam.serviceAccountKeyAdmin"
+
+# Project IAM Admin — needed to grant the storage.objectAdmin role
+# to the GCS service account (google_project_iam_member in gcs.tf)
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${SA_EMAIL}" \
+  --role="roles/resourcemanager.projectIamAdmin"
 ```
 
 ### 4.3 Download the service account key
@@ -594,6 +643,8 @@ for ns in infra apps; do
 done
 
 # GCS service account key secret (apps namespace only)
+# The Terraform output already decodes the key via base64decode(),
+# so --from-literal stores the raw JSON without double-encoding.
 kubectl create secret generic sobel-secrets \
   --namespace=apps \
   --from-literal=GCS_SERVICE_ACCOUNT_KEY="${GCS_SA_KEY}" \
@@ -711,49 +762,71 @@ kubectl get configmap sobel-config -n apps -o yaml | grep -E "GCS_UPLOAD|GCS_RES
 
 ## 11. Deploy Application Services (Backend, Split, Joiner, Frontend, DLQ Monitor)
 
-### 11.1 Replace the PROJECT_ID placeholder in Deployment manifests
+**WHAT**: Use Kustomize to substitute `PROJECT_ID` in image references
+and environment variables, then apply all application Deployments.
+**WHY**: Kustomize handles the placeholder substitution without modifying
+the original YAML files. The repo stays clean and reusable across
+different GCP projects. The only file changed during deployment is
+`kubernetes/kustomization.yaml`, and only temporarily.
 
-**WHAT**: Update the image references in the Kubernetes manifests from
-`gcr.io/PROJECT_ID/...` to `gcr.io/YOUR_ACTUAL_PROJECT_ID/...`.
-**WHY**: The manifests contain the literal string `PROJECT_ID` as a
-placeholder. If not replaced, pods try to pull an image from a
-non-existent registry path and enter `ImagePullBackOff`.
+### 11.1 Set your project ID in kustomization.yaml
 
-```bash
-# Backup originals
-cp kubernetes/backend-deployment.yaml kubernetes/backend-deployment.yaml.bak
-cp kubernetes/split-deployment.yaml kubernetes/split-deployment.yaml.bak
-cp kubernetes/joiner-deployment.yaml kubernetes/joiner-deployment.yaml.bak
-cp kubernetes/frontend-deployment.yaml kubernetes/frontend-deployment.yaml.bak
-cp kubernetes/dlq-monitor-deployment.yaml kubernetes/dlq-monitor-deployment.yaml.bak
-
-# Replace the placeholder
-sed -i "s|gcr.io/PROJECT_ID/|gcr.io/${PROJECT_ID}/|g" kubernetes/*-deployment.yaml
-```
-
-> The CI/CD pipeline does this automatically. When deploying manually,
-> you must do it yourself.
-
-### 11.2 Apply the application Deployments
+The Kubernetes manifests use `gcr.io/PROJECT_ID/` as an image placeholder.
+The `kubernetes/kustomization.yaml` file contains a `REPLACE_PROJECT_ID`
+string in its `images:` and `configMapGenerator:` sections. Replace it
+with your actual `$PROJECT_ID`:
 
 ```bash
-kubectl apply -f kubernetes/backend-deployment.yaml
-kubectl apply -f kubernetes/split-deployment.yaml
-kubectl apply -f kubernetes/joiner-deployment.yaml
-kubectl apply -f kubernetes/frontend-deployment.yaml
-kubectl apply -f kubernetes/dlq-monitor-deployment.yaml
+sed -i "s|REPLACE_PROJECT_ID|${PROJECT_ID}|g" kubernetes/kustomization.yaml
+
+# Verify the substitution
+grep -c "REPLACE_PROJECT_ID" kubernetes/kustomization.yaml
+# Expected output: 0
 ```
+
+> **How Kustomize handles the substitution**:
+> - The `images:` field replaces `gcr.io/PROJECT_ID/<service>` with
+>   `gcr.io/<YOUR_PROJECT_ID>/<service>` in all Deployment image fields.
+> - The `configMapGenerator` creates a `deployment-config` ConfigMap with
+>   your `PROJECT_ID`.
+> - The `replacements:` field patches `MIG_PROJECT` in the
+>   worker-autoscaler Deployment with the value from that ConfigMap.
+> - Application Deployment YAMLs remain untouched — no `sed -i` on
+>   source-controlled files.
+
+### 11.2 Apply all application Deployments with Kustomize
+
+```bash
+kubectl apply -k kubernetes/
+```
+
+This single command processes `kustomization.yaml` and applies:
+- `namespaces.yaml` (idempotent — already exists)
+- `configmaps-secrets.yaml` (idempotent)
+- RabbitMQ and Redis StatefulSets (idempotent)
+- All 6 application Deployments (Backend, Split, Joiner, Frontend,
+  DLQ Monitor, Worker Autoscaler)
 
 ### 11.3 Wait for all deployments to be ready
 
 ```bash
-for svc in backend split joiner frontend dlq-monitor; do
+for svc in backend split joiner frontend dlq-monitor worker-autoscaler; do
   kubectl rollout status deployment/"${svc}" -n apps --timeout=120s
   echo "=== ${svc} is ready ==="
 done
 ```
 
-### 11.4 Get the frontend external IP
+### 11.4 Revert kustomization.yaml (optional but recommended)
+
+Restore the placeholder so the file is clean for the next deployment:
+
+```bash
+git checkout kubernetes/kustomization.yaml
+# -- or --
+sed -i "s|${PROJECT_ID}|REPLACE_PROJECT_ID|g" kubernetes/kustomization.yaml
+```
+
+### 11.5 Get the frontend external IP
 
 **WHAT**: The frontend is exposed via a LoadBalancer service on port 80.
 **WHY**: Users connect to this IP to upload images and download results.
@@ -791,28 +864,75 @@ script and some metadata. However, the `rabbitmq_host` metadata field
 is currently **empty** — it must be populated with the RabbitMQ LB IP
 before any worker VM can start.
 
-### 12.2 Update the instance template with the RabbitMQ host
+### 12.2 Create a new instance template with the RabbitMQ host
 
-**WHAT**: The instance template has a `rabbitmq_host` metadata field
-that the startup script reads to connect to RabbitMQ. Set it to the
-LB IP you retrieved in step 9.7.
-**WHY**: Without this metadata, the worker startup script exits with
-an error because it cannot determine where RabbitMQ is.
+**WHAT**: Create a replacement instance template with `rabbitmq_host`
+set to the RabbitMQ LB IP. The startup script reads this metadata
+at boot to connect to RabbitMQ.
+**WHY**: Instance templates are immutable — you cannot edit an existing
+one. A new template must be created with the correct metadata. Also,
+`gcloud compute instance-templates create` does NOT have a
+`--source-instance-template` flag; you must recreate the template
+using the same parameters Terraform used plus the new metadata value.
+
+First, create the worker startup script (extracted from
+`terraform/mig.tf`):
 
 ```bash
-# Get the current template name from the MIG
-CURRENT_TEMPLATE=$(gcloud compute instance-groups managed describe \
-  sobel-worker-mig --region=us-central1 \
-  --format="value(versions[0].instanceTemplate)" | awk -F/ '{print $NF}')
+cat > /tmp/worker-startup.sh << 'SCRIPT'
+#!/bin/bash
+set -e
 
-echo "Current template: ${CURRENT_TEMPLATE}"
+RABBITMQ_HOST=$(curl -s -H "Metadata-Flavor: Google" \
+  http://metadata.google.internal/computeMetadata/v1/instance/attributes/rabbitmq_host)
 
-# Create a new template with rabbitmq_host set
+if [ -z "$RABBITMQ_HOST" ]; then
+  echo "ERROR: rabbitmq_host metadata not set."
+  exit 1
+fi
+
+RABBITMQ_USER=$(curl -s -H "Metadata-Flavor: Google" \
+  http://metadata.google.internal/computeMetadata/v1/instance/attributes/rabbitmq_user)
+RABBITMQ_PASSWORD=$(curl -s -H "Metadata-Flavor: Google" \
+  http://metadata.google.internal/computeMetadata/v1/instance/attributes/rabbitmq_password)
+RABBITMQ_PORT=$(curl -s -H "Metadata-Flavor: Google" \
+  http://metadata.google.internal/computeMetadata/v1/instance/attributes/rabbitmq_port)
+GCS_UPLOAD=$(curl -s -H "Metadata-Flavor: Google" \
+  http://metadata.google.internal/computeMetadata/v1/instance/attributes/gcs_upload_bucket)
+GCS_RESULT=$(curl -s -H "Metadata-Flavor: Google" \
+  http://metadata.google.internal/computeMetadata/v1/instance/attributes/gcs_result_bucket)
+WORKER_ID="worker-$(hostname -s)"
+
+docker run -d --restart=unless-stopped --name sobel-worker \
+  -e RABBITMQ_URL="amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@${RABBITMQ_HOST}:${RABBITMQ_PORT}/" \
+  -e GCS_UPLOAD_BUCKET="${GCS_UPLOAD}" \
+  -e GCS_RESULT_BUCKET="${GCS_RESULT}" \
+  -e WORKER_ID="${WORKER_ID}" \
+  gcr.io/${PROJECT_ID}/worker:latest
+SCRIPT
+```
+
+Then create the new template with all parameters matching
+`terraform/mig.tf` plus `rabbitmq_host`:
+
+```bash
 NEW_TEMPLATE="sobel-worker-template-$(date +%s)"
 
 gcloud compute instance-templates create "${NEW_TEMPLATE}" \
-  --source-instance-template="${CURRENT_TEMPLATE}" \
-  --metadata="rabbitmq_host=${RABBIT_LB_IP}"
+  --machine-type=e2-standard-2 \
+  --image-project=cos-cloud \
+  --image-family=cos-stable \
+  --boot-disk-size=30GB \
+  --boot-disk-type=pd-standard \
+  --network=sobel-vpc \
+  --subnet=sobel-subnet \
+  --tags=worker \
+  --service-account="sobel-gcs-access@${PROJECT_ID}.iam.gserviceaccount.com" \
+  --scopes=cloud-platform \
+  --metadata="rabbitmq_host=${RABBIT_LB_IP},rabbitmq_user=guest,rabbitmq_password=${TF_RABBIT_PW},rabbitmq_port=5672,gcs_upload_bucket=${UPLOAD_BUCKET},gcs_result_bucket=${RESULT_BUCKET}" \
+  --metadata-from-file=startup-script=/tmp/worker-startup.sh
+
+echo "Created template: ${NEW_TEMPLATE}"
 ```
 
 ### 12.3 Roll the MIG to use the new template
@@ -844,85 +964,26 @@ gcloud compute instance-groups managed list
 
 ## 13. Deploy the Worker Autoscaler
 
-**WHAT**: Create a Kubernetes Deployment that continuously monitors the
-RabbitMQ queue depth and resizes the MIG accordingly.
+**WHAT**: The Worker Autoscaler is a Kubernetes Deployment that
+continuously monitors the RabbitMQ queue depth and resizes the MIG
+accordingly.
 **WHY**: Worker VMs cost money when running. The autoscaler keeps them
 at 0 when idle and scales up when fragments appear in the queue.
 
-### 13.1 Create the autoscaler Deployment manifest
+### 13.1 How the autoscaler is deployed
 
-The `kubernetes/` directory does not yet have a manifest for the
-worker-autoscaler. Create one now:
+The `kubernetes/worker-autoscaler-deployment.yaml` file is tracked in the
+repository. It was already applied in step 11.2 as part of
+`kubectl apply -k kubernetes/`. Kustomize handles:
 
-```bash
-cat > kubernetes/worker-autoscaler-deployment.yaml << 'EOF'
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: worker-autoscaler
-  namespace: apps
-  labels:
-    app: worker-autoscaler
-    component: autoscaler
-    environment: production
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: worker-autoscaler
-  template:
-    metadata:
-      labels:
-        app: worker-autoscaler
-        component: autoscaler
-    spec:
-      containers:
-        - name: worker-autoscaler
-          image: gcr.io/PROJECT_ID/worker_autoscaler:latest
-          env:
-            - name: RABBITMQ_MGMT_URL
-              value: "http://rabbitmq.infra.svc.cluster.local:15672"
-            - name: RABBITMQ_DEFAULT_USER
-              value: "guest"
-            - name: RABBITMQ_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: rabbitmq-secret
-                  key: rabbitmq-password
-            - name: MIG_PROJECT
-              value: "${PROJECT_ID}"
-            - name: MIG_REGION
-              value: "us-central1"
-            - name: MIG_NAME
-              value: "sobel-worker-mig"
-            - name: MAX_WORKERS
-              value: "10"
-            - name: MIN_WORKERS
-              value: "0"
-            - name: WORKER_FRAGMENT_CAPACITY
-              value: "8"
-            - name: POLL_INTERVAL_SECS
-              value: "30"
-          resources:
-            requests:
-              cpu: 50m
-              memory: 64Mi
-            limits:
-              cpu: 200m
-              memory: 128Mi
-EOF
+- Image substitution (`gcr.io/PROJECT_ID/worker_autoscaler` → your project)
+- `MIG_PROJECT` env var substitution via the `deployment-config`
+  ConfigMap (the old `${PROJECT_ID}` shell-style placeholder is now
+  `GCP_PROJECT_ID`, replaced by Kustomize's `replacements:` field)
+- Memory limits: `requests=128Mi / limits=256Mi` (increased from the
+  original 64Mi/128Mi to prevent OOMKilled crashes)
 
-# Replace the PROJECT_ID placeholder in the image reference
-sed -i "s|gcr.io/PROJECT_ID/|gcr.io/${PROJECT_ID}/|g" kubernetes/worker-autoscaler-deployment.yaml
-```
-
-### 13.2 Apply the autoscaler
-
-```bash
-kubectl apply -f kubernetes/worker-autoscaler-deployment.yaml
-kubectl rollout status deployment/worker-autoscaler -n apps --timeout=120s
-```
+### 13.2 Verify the autoscaler is running
 
 Verify it is polling:
 ```bash

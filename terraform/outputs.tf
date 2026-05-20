@@ -46,8 +46,8 @@ output "gcs_service_account_email" {
 }
 
 output "gcs_service_account_key" {
-  value       = google_service_account_key.gcs_sa_key.private_key
-  description = "GCS service account private key (base64-encoded, for K8s Secret)"
+  value       = base64decode(google_service_account_key.gcs_sa_key.private_key)
+  description = "GCS service account private key (decoded JSON, ready for K8s Secret --from-literal)"
   sensitive   = true
 }
 

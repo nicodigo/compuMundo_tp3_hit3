@@ -46,9 +46,6 @@ async def start_consumer(
                 parts = gcs_path[prefix_end:].split("/", 1)
                 upload_bucket = parts[0]
                 blob_name = parts[1]
-                else:
-                    upload_bucket = settings.gcs_upload_bucket
-                    blob_name = gcs_path
 
                 logger.info("Splitting image %s (bucket=%s, blob=%s)",
                             image_id, upload_bucket, blob_name)

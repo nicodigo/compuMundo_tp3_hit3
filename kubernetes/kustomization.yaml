@@ -1,0 +1,48 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespaces.yaml
+  - configmaps-secrets.yaml
+  - rabbitmq-deployment.yaml
+  - redis-deployment.yaml
+  - backend-deployment.yaml
+  - split-deployment.yaml
+  - joiner-deployment.yaml
+  - frontend-deployment.yaml
+  - dlq-monitor-deployment.yaml
+  - worker-autoscaler-deployment.yaml
+
+images:
+  - name: gcr.io/PROJECT_ID/backend
+    newName: gcr.io/REPLACE_PROJECT_ID/backend
+  - name: gcr.io/PROJECT_ID/split
+    newName: gcr.io/REPLACE_PROJECT_ID/split
+  - name: gcr.io/PROJECT_ID/joiner
+    newName: gcr.io/REPLACE_PROJECT_ID/joiner
+  - name: gcr.io/PROJECT_ID/frontend
+    newName: gcr.io/REPLACE_PROJECT_ID/frontend
+  - name: gcr.io/PROJECT_ID/dlq_monitor
+    newName: gcr.io/REPLACE_PROJECT_ID/dlq_monitor
+  - name: gcr.io/PROJECT_ID/worker_autoscaler
+    newName: gcr.io/REPLACE_PROJECT_ID/worker_autoscaler
+
+configMapGenerator:
+  - name: deployment-config
+    namespace: apps
+    options:
+      disableNameSuffixHash: true
+    literals:
+      - PROJECT_ID=REPLACE_PROJECT_ID
+
+replacements:
+  - source:
+      kind: ConfigMap
+      name: deployment-config
+      fieldPath: data.PROJECT_ID
+    targets:
+      - select:
+          kind: Deployment
+          name: worker-autoscaler
+        fieldPaths:
+          - spec.template.spec.containers.[name=worker-autoscaler].env.[name=MIG_PROJECT].value

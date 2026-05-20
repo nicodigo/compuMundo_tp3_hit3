@@ -1,0 +1,55 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker-autoscaler
+  namespace: apps
+  labels:
+    app: worker-autoscaler
+    component: autoscaler
+    environment: production
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: worker-autoscaler
+  template:
+    metadata:
+      labels:
+        app: worker-autoscaler
+        component: autoscaler
+    spec:
+      containers:
+        - name: worker-autoscaler
+          image: gcr.io/PROJECT_ID/worker_autoscaler:latest
+          env:
+            - name: RABBITMQ_MGMT_URL
+              value: "http://rabbitmq.infra.svc.cluster.local:15672"
+            - name: RABBITMQ_DEFAULT_USER
+              value: "guest"
+            - name: RABBITMQ_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: rabbitmq-secret
+                  key: rabbitmq-password
+            - name: MIG_PROJECT
+              value: "GCP_PROJECT_ID"
+            - name: MIG_REGION
+              value: "us-central1"
+            - name: MIG_NAME
+              value: "sobel-worker-mig"
+            - name: MAX_WORKERS
+              value: "10"
+            - name: MIN_WORKERS
+              value: "0"
+            - name: WORKER_FRAGMENT_CAPACITY
+              value: "8"
+            - name: POLL_INTERVAL_SECS
+              value: "30"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi

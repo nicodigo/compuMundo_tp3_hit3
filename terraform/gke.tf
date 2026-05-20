@@ -6,6 +6,7 @@ resource "google_container_cluster" "sobel_cluster" {
   initial_node_count       = 1
 
   node_config {
+      machine_type = "e2-standard-2"
       disk_type    = "pd-standard"
       disk_size_gb = 50
   }
