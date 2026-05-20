@@ -5,6 +5,11 @@ resource "google_container_cluster" "sobel_cluster" {
   remove_default_node_pool = true
   initial_node_count       = 1
 
+  node_config {
+      disk_type    = "pd-standard"
+      disk_size_gb = 50
+  }
+
   network    = google_compute_network.sobel_vpc.id
   subnetwork = google_compute_subnetwork.sobel_subnet.id
 
