@@ -1180,35 +1180,67 @@ Open `http://${FRONTEND_IP}` in a browser. You should see:
   detection"
 - An "Upload" button
 
-Select a PNG image (recommended: 512x512 pixels or larger — dimensions
+Select a PNG image (recommended: 64x64 or larger — dimensions
 must be evenly divisible by 4). Click **Upload**.
 
 You should observe:
-1. "Uploading..." status text
+1. "Uploading..." status text → "Processing..."
 2. A progress bar that fills as fragments complete
 3. A "Download Result" button when all 16 fragments are processed
+4. If workers are scaling from 0, processing may take 1–3 minutes
+
+> **Troubleshooting**: If the progress bar stalls at 0/16, check that
+> workers are running (`gcloud compute instance-groups managed list-instances
+> sobel-worker-mig --region=us-central1`) and that the autoscaler has
+> detected the queue depth (`kubectl logs -n apps deployment/worker-autoscaler
+> --tail=5`).
 
 ### 15.2 Upload via the API (alternative)
 
 ```bash
-# Create a small test PNG
+# Set the frontend IP
+FRONTEND_IP="34.59.55.254"   # replace with current LB IP
+
+# Create a small test PNG (pure Python, no PIL needed)
 python3 -c "
-from PIL import Image
-img = Image.new('L', (128, 128), 100)
-img.save('/tmp/test-sobel.png')
+import struct, zlib
+w, h = 64, 64
+def chunk(t, d):
+    c = t + d
+    return struct.pack('>I', len(d)) + c + struct.pack('>I', zlib.crc32(c) & 0xffffffff)
+raw = b''
+for y in range(h):
+    raw += b'\x00' + b'\xff\xff\xff' * w
+png = b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0)) + chunk(b'IDAT', zlib.compress(raw)) + chunk(b'IEND', b'')
+with open('/tmp/test-sobel.png', 'wb') as f:
+    f.write(png)
+print('Created /tmp/test-sobel.png ({}x{})'.format(w, h))
 "
 
-# Upload
+# Upload and capture the image_id
 curl -s -X POST "http://${FRONTEND_IP}/api/images" \
   -F "file=@/tmp/test-sobel.png" | python3 -m json.tool
 ```
 
 ### 15.3 Check processing status
 
-Replace IMAGE_ID from the upload response:
+Replace `IMAGE_ID` from the upload response:
 
 ```bash
 curl -s "http://${FRONTEND_IP}/api/images/IMAGE_ID/status" | python3 -m json.tool
+```
+
+Expected output when completed:
+```json
+{
+    "image_id": "IMAGE_ID",
+    "filename": "test-sobel.png",
+    "status": "completed",
+    "fragments_completed": 16,
+    "total_fragments": 16,
+    "result_gcs_path": "gs://sobel-results-nicodigo5/IMAGE_ID/final.png",
+    "processing_time_ms": 150
+}
 ```
 
 ### 15.4 Download the result
@@ -1216,6 +1248,8 @@ curl -s "http://${FRONTEND_IP}/api/images/IMAGE_ID/status" | python3 -m json.too
 ```bash
 curl -s "http://${FRONTEND_IP}/api/images/IMAGE_ID/result" | python3 -m json.tool
 ```
+
+The response includes a `signed_url` valid for 15 minutes. Open it in a browser to download the edge-detection result.
 
 ---
 
