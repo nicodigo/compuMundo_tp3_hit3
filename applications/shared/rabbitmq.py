@@ -285,14 +285,18 @@ class RabbitMQManager:
         async def _wrapper(message: AbstractIncomingMessage) -> None:
             try:
                 await callback(message)
+            except aio_pika.exceptions.MessageProcessError:
+                # Message already acked/nacked by the callback via message.process()
+                pass
             except Exception:
                 logger.exception("Unhandled error in consumer callback for queue %s",
                                  queue_name.value)
-                # NACK without requeue to avoid infinite loops
-                await message.nack(requeue=False)
 
         async def _run() -> None:
-            await queue.consume(_wrapper, no_ack=auto_ack, prefetch_count=prefetch_count)
+            # Set QoS prefetch before consuming (aio_pika requires it on the channel)
+            if not auto_ack:
+                await self._channel.set_qos(prefetch_count=prefetch_count)
+            await queue.consume(_wrapper, no_ack=auto_ack)
             # Keep the task alive
             while True:
                 await asyncio.sleep(3600)

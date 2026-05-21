@@ -27,17 +27,8 @@
     const downloadLink = document.getElementById("download-link");
 
     // ---- Init ----
-    let BACKEND_URL = "";
-
     async function init() {
-        try {
-            const resp = await fetch("/config");
-            const cfg = await resp.json();
-            BACKEND_URL = cfg.backend_url;
-            uploadBtn.disabled = false;
-        } catch (err) {
-            showError("Failed to load configuration. Is the backend running?");
-        }
+        uploadBtn.disabled = false;
     }
 
     // ---- Event listeners ----
@@ -74,7 +65,7 @@
             const formData = new FormData();
             formData.append("file", file);
 
-            const resp = await fetch(BACKEND_URL + "/api/images", {
+            const resp = await fetch("/api/images", {
                 method: "POST",
                 body: formData,
             });
@@ -157,7 +148,7 @@
             }
             try {
                 const resp = await fetch(
-                    BACKEND_URL + "/api/images/" + encodeURIComponent(imageId) + "/status"
+                    "/api/images/" + encodeURIComponent(imageId) + "/status"
                 );
                 if (!resp.ok) return;
                 const data = await resp.json();
@@ -187,7 +178,7 @@
     async function fetchDownloadLink() {
         try {
             const resp = await fetch(
-                BACKEND_URL + "/api/images/" + encodeURIComponent(STATE.imageId) + "/result"
+                "/api/images/" + encodeURIComponent(STATE.imageId) + "/result"
             );
             if (!resp.ok) return;
             const data = await resp.json();

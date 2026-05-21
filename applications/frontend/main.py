@@ -4,6 +4,8 @@ Frontend Service — FastAPI application entry point.
 Serves the static web UI (HTML/JS/CSS), provides a Server-Sent Events
 endpoint for real-time processing progress, and consumes fragment.result
 messages from the sobel.results fanout exchange for SSE push.
+
+Also acts as a reverse proxy for /api/* requests → BACKEND_URL.
 """
 
 from __future__ import annotations
@@ -16,8 +18,9 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import aio_pika
-from fastapi import FastAPI
-from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
+import httpx
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from ..shared.config import load_settings
@@ -73,6 +76,21 @@ async def lifespan(app: FastAPI):
     await redis.connect()
     await gcs.connect()
 
+    # Determine backend URL for API proxy
+    backend_url = os.environ.get(
+        "BACKEND_URL",
+        "http://backend.apps.svc.cluster.local:8000",
+    ).rstrip("/")
+    _state["backend_url"] = backend_url
+
+    # Create shared httpx client for proxy requests (connection pooling)
+    _proxy_client = httpx.AsyncClient(
+        base_url=backend_url,
+        timeout=30.0,
+        follow_redirects=False,
+    )
+    _state["proxy_client"] = _proxy_client
+
     _state["rabbitmq"] = rabbitmq
     _state["redis"] = redis
     _state["gcs"] = gcs
@@ -82,7 +100,7 @@ async def lifespan(app: FastAPI):
     consumer_task = await start_dashboard_consumer(rabbitmq)
     _state["consumer_task"] = consumer_task
 
-    logger.info("Frontend service started")
+    logger.info("Frontend service started (proxying /api/* → %s)", backend_url)
 
     yield
 
@@ -92,6 +110,7 @@ async def lifespan(app: FastAPI):
     except asyncio.CancelledError:
         pass
 
+    await _proxy_client.aclose()
     await redis.close()
     await rabbitmq.close()
     logger.info("Frontend service stopped")
@@ -166,6 +185,60 @@ async def sse_stream(image_id: str):
 async def index():
     """Redirect to static index.html."""
     return RedirectResponse(url="/static/index.html")
+
+
+# Supported HTTP methods for API proxy
+_PROXY_METHODS = {"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"}
+
+
+@app.api_route("/api/{path:path}", methods=list(_PROXY_METHODS))
+async def proxy_api(request: Request, path: str):
+    """Reverse proxy /api/* requests to the backend service."""
+    proxy_client: httpx.AsyncClient | None = _state.get("proxy_client")
+    if proxy_client is None:
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "Backend proxy not available"},
+        )
+
+    # Read the raw body
+    body = await request.body()
+
+    # Forward the request
+    try:
+        proxy_resp = await proxy_client.request(
+            method=request.method,
+            url=f"/api/{path}",
+            content=body if body else None,
+            headers={
+                k: v for k, v in request.headers.items()
+                if k.lower() not in ("host", "content-length", "transfer-encoding")
+            },
+        )
+    except httpx.RequestError as exc:
+        logger.error("Proxy request to backend failed: %s", exc)
+        return JSONResponse(
+            status_code=502,
+            content={"detail": f"Backend unreachable: {exc}"},
+        )
+
+    # Build response, excluding hop-by-hop headers
+    hop_by_hop = {
+        "transfer-encoding", "connection", "keep-alive",
+        "proxy-authenticate", "proxy-authorization", "te", "trailer",
+        "upgrade",
+    }
+    response_headers = {
+        k: v for k, v in proxy_resp.headers.items()
+        if k.lower() not in hop_by_hop
+    }
+
+    return Response(
+        content=proxy_resp.content,
+        status_code=proxy_resp.status_code,
+        headers=response_headers,
+        media_type=proxy_resp.headers.get("content-type"),
+    )
 
 
 async def start_dashboard_consumer(

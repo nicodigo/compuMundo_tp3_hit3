@@ -35,7 +35,7 @@ MAX_WORKERS: int = int(os.environ.get("MAX_WORKERS", "10"))
 MIN_WORKERS: int = int(os.environ.get("MIN_WORKERS", "0"))
 WORKER_FRAGMENT_CAPACITY: int = int(os.environ.get("WORKER_FRAGMENT_CAPACITY", "8"))
 POLL_INTERVAL_SECS: int = int(os.environ.get("POLL_INTERVAL_SECS", "30"))
-SCALING_COOLDOWN_SECS: int = 60
+SCALING_COOLDOWN_SECS: int = 180
 
 
 async def _get_queue_depth() -> int:
@@ -79,17 +79,22 @@ def _calculate_target(messages_ready: int) -> int:
 
 
 async def _get_current_size(mig_client: compute_v1.RegionInstanceGroupManagersClient) -> int:
-    """Read current target size of the MIG."""
+    """Read current number of managed instances in the MIG (not target size)."""
     try:
-        request = compute_v1.GetRegionInstanceGroupManagerRequest(
+        # Use keyword arguments instead of a request object to avoid API type issues
+        pager = await asyncio.to_thread(
+            mig_client.list_managed_instances,
             project=MIG_PROJECT,
             region=MIG_REGION,
             instance_group_manager=MIG_NAME,
         )
-        mig = await asyncio.to_thread(mig_client.get, request=request)
-        size = mig.target_size if mig else 0
-        logger.debug("Current MIG size: %d", size)
-        return size
+        # Pager yields ManagedInstance objects directly; count RUNNING instances
+        count = 0
+        for inst in pager:
+            if inst.instance_status == "RUNNING":
+                count += 1
+        logger.debug("Current MIG running instances: %d", count)
+        return count
     except Exception:
         logger.exception("Failed to get MIG current size")
         return 0
@@ -128,7 +133,11 @@ async def main() -> None:
         POLL_INTERVAL_SECS, SCALING_COOLDOWN_SECS,
     )
 
-    mig_client = compute_v1.RegionInstanceGroupManagersClient()
+    # Initialize MIG client in a thread so blocking credential discovery
+    # does not deadlock the asyncio event loop inside a GKE pod.
+    mig_client = await asyncio.to_thread(
+        compute_v1.RegionInstanceGroupManagersClient,
+    )
     last_resize_at = 0.0
 
     while True:
@@ -140,7 +149,7 @@ async def main() -> None:
             current_size = await _get_current_size(mig_client)
 
             if target_size == current_size:
-                logger.debug(
+                logger.info(
                     "Queue depth: %d, current=%d, target=%d — no change",
                     messages_ready, current_size, target_size,
                 )

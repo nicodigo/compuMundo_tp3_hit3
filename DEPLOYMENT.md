@@ -85,10 +85,18 @@ cause errors partway through that are harder to debug later.
 
 | Resource             | Quota Required | Default Free Tier Quota |
 |----------------------|----------------|-------------------------|
-| Compute Engine CPUs  | 12 vCPUs       | 8–24 (varies by region) |
+| Compute Engine CPUs  | 8-10 vCPUs     | 8–24 (varies by region) |
 | GKE Clusters         | 1              | 5                       |
 | Cloud Storage buckets| 2              | 5 (per project)         |
 | Firewall rules       | ~6             | 500                     |
+
+> **Single-zone design**: This project pins all resources to `us-central1-b`
+> (see `terraform/gke.tf` `node_locations`). This is intentional — it keeps
+> CPU usage low (4 vCPUs baseline for GKE, leaving 8 vCPUs headroom for
+> worker VMs), prevents zone-fragmentation of StatefulSet PVCs, and keeps
+> RabbitMQ ↔ worker traffic within one zone (no cross-zone latency or
+> egress charges). High availability across zones is not a requirement for
+> this student project.
 
 If you get a "Quota exceeded" error during `terraform apply`, request a
 quota increase at: https://console.cloud.google.com/iam-admin/quotas
@@ -519,6 +527,59 @@ export TF_REDIS_PW=$(terraform output -raw redis_password)
 echo "Upload bucket: ${UPLOAD_BUCKET}"
 echo "Result bucket: ${RESULT_BUCKET}"
 ```
+
+### 6.5 Resource Budget
+
+**WHAT**: Document the CPU allocation across GKE and worker VMs so
+the deployer can verify quota headroom before applying.
+
+**WHY**: The project operates under tight GCP quotas (12 vCPUs in
+`us-central1` by default). Understanding the budget prevents
+`QUOTA_EXCEEDED` errors during worker autoscaling.
+
+| Component           | Instance Type  | vCPUs/node | Nodes (min) | Nodes (max) | vCPUs (min) | vCPUs (max) |
+|---------------------|----------------|------------|-------------|-------------|-------------|-------------|
+| infra-pool          | e2-standard-2  | 2          | 1 (static)  | 1           | 2           | 2           |
+| app-pool            | e2-standard-2  | 2          | 1 (HPA)     | 4 (HPA)     | 2           | 8           |
+| **GKE subtotal**    |                |            |             |             | **4**       | **10**      |
+| Worker MIG          | e2-standard-2  | 2          | 0           | 4           | 0           | 8           |
+| **Grand total**     |                |            |             |             | **4**       | **10–18¹**  |
+
+¹ Worker MIG maximum is 10 (set in `worker_max_replicas`), but at GKE max
+the quota headroom is only 2 vCPUs (12 − 10 = 2). The autoscaler should
+target `MAX_WORKERS=4` to stay within quota during normal operation.
+
+**Application pod CPU requests** (all pods fit on 2 vCPUs):
+
+| Pod                 | Replicas | CPU req/pod | CPU total | Notes |
+|---------------------|----------|-------------|-----------|-------|
+| backend             | 2        | 100m        | 200m      | HPA 2-8; consider reducing to 1 for student project |
+| frontend            | 2        | 100m        | 200m      | HPA 2-4; consider reducing to 1 for student project |
+| split               | 1        | 100m        | 100m      | |
+| joiner              | 1        | 100m        | 100m      | |
+| dlq-monitor         | 1        | 50m         | 50m       | |
+| worker-autoscaler   | 1        | 50m         | 50m       | |
+| **apps subtotal**   | **8**    |             | **700m**   | Fits on one 2-CPU node |
+| rabbitmq            | 1        | 250m        | 250m      | infra-pool (static) |
+| redis               | 1        | 100m        | 100m      | infra-pool (static) |
+| **infra subtotal**  | **2**    |             | **350m**   | Fits on one 2-CPU node |
+
+### 6.6 Important: StatefulSet PVC Zone Binding
+
+> **Warning**: RabbitMQ and Redis use StatefulSets with `volumeClaimTemplates`.
+> Once a PVC is created, it is permanently bound to the zone where the pod
+> was first scheduled. If you later change node pool zones (e.g., remove
+> `us-central1-b` from `node_locations`), surviving PVCs will be in the
+> wrong zone and pods will remain `Pending` with
+> `"node(s) had volume node affinity conflict"`.
+>
+> **Do not change `node_locations` on `infra_pool` after the first
+> `terraform apply`.** If you must move to a different zone, you need a
+> full teardown (`terraform destroy`, delete PVCs, redeploy from scratch).
+>
+> Both StatefulSets also include explicit `requiredDuringScheduling` zone
+> affinity for `us-central1-b` to prevent accidental rescheduling during
+> node pool changes.
 
 ---
 

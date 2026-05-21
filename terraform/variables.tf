@@ -11,8 +11,8 @@ variable "region" {
 
 variable "zones" {
   type        = list(string)
-  description = "GCP zones within the region"
-  default     = ["us-central1-a", "us-central1-b"]
+  description = "GCP zones within the region (single-zone for quota; do not expand)"
+  default     = ["us-central1-b"]
 }
 
 variable "cluster_name" {

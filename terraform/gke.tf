@@ -47,7 +47,8 @@ resource "google_container_node_pool" "infra_pool" {
   location = var.region
   cluster  = google_container_cluster.sobel_cluster.name
 
-  node_count = var.infra_node_count
+  node_locations = ["us-central1-b"]
+  node_count     = var.infra_node_count
 
   node_config {
     machine_type = var.infra_machine_type
@@ -73,6 +74,7 @@ resource "google_container_node_pool" "app_pool" {
   location = var.region
   cluster  = google_container_cluster.sobel_cluster.name
 
+  node_locations     = ["us-central1-b"]
   initial_node_count = var.app_node_count
 
   autoscaling {

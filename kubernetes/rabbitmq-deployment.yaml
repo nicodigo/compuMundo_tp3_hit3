@@ -26,6 +26,15 @@ spec:
           operator: "Equal"
           value: "infra"
           effect: "NoSchedule"
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                - key: topology.kubernetes.io/zone
+                  operator: In
+                  values:
+                    - us-central1-b
       nodeSelector:
         pool: infra
       containers:
