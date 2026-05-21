@@ -802,22 +802,12 @@ echo "RabbitMQ LB IP: ${RABBIT_LB_IP}"
 
 ## 10. Configure the Application ConfigMap
 
-**WHAT**: Replace the placeholder bucket names in the ConfigMap with
-the actual GCS bucket names created by Terraform.
-**WHY**: The application code reads `GCS_UPLOAD_BUCKET` and
-`GCS_RESULT_BUCKET` from the ConfigMap. If these contain the literal
-string `<GCS_UPLOAD_BUCKET>`, all GCS operations will fail.
-
-```bash
-kubectl patch configmap sobel-config -n apps --type merge \
-  -p "{\"data\":{\"GCS_UPLOAD_BUCKET\":\"${UPLOAD_BUCKET}\",\"GCS_RESULT_BUCKET\":\"${RESULT_BUCKET}\"}}"
-```
-
-Verify:
-```bash
-kubectl get configmap sobel-config -n apps -o yaml | grep -E "GCS_UPLOAD|GCS_RESULT"
-# Expected: the actual bucket names, not placeholders
-```
+> **⚠️ MOVED**: The ConfigMap patch command has been moved to **Section
+> 11.6**. It must run **after** `kubectl apply -k kubernetes/` (Section
+> 11.2), because Kustomize re-applies `configmaps-secrets.yaml` which
+> contains the placeholder values `<GCS_UPLOAD_BUCKET>` and
+> `<GCS_RESULT_BUCKET>`. Patching before `kubectl apply -k` is
+> overwritten. See Section 11.6 for the actual commands.
 
 ---
 
@@ -907,6 +897,39 @@ done
 echo "Frontend URL: http://${FRONTEND_IP}"
 ```
 
+### 11.6 Patch the ConfigMap with actual bucket names
+
+**WHAT**: Replace the placeholder bucket names (`<GCS_UPLOAD_BUCKET>`,
+`<GCS_RESULT_BUCKET>`) with the actual GCS bucket names from Terraform.
+**WHY**: The `configmaps-secrets.yaml` file that Kustomize re-applies in
+step 11.2 contains literal placeholder strings. The patch from step 10
+was **overwritten** by `kubectl apply -k` because Kustomize re-applies
+all resources listed in `kustomization.yaml`. This patch **must** run
+after `kubectl apply -k`, not before.
+
+```bash
+kubectl patch configmap sobel-config -n apps --type merge \
+  -p "{\"data\":{\"GCS_UPLOAD_BUCKET\":\"${UPLOAD_BUCKET}\",\"GCS_RESULT_BUCKET\":\"${RESULT_BUCKET}\"}}"
+```
+
+Verify:
+```bash
+kubectl get configmap sobel-config -n apps -o yaml | grep -E "GCS_UPLOAD|GCS_RESULT"
+# Expected: the actual bucket names (e.g. sobel-uploads-YOUR_INITIALS), not placeholders
+```
+
+After patching, restart the deployments that read these values so they
+pick up the new ConfigMap data:
+
+```bash
+kubectl rollout restart deployment/backend deployment/split \
+  deployment/joiner deployment/frontend deployment/dlq-monitor -n apps
+
+# Wait for backend to be ready again
+kubectl rollout status deployment/backend -n apps --timeout=120s
+kubectl rollout status deployment/frontend -n apps --timeout=120s
+```
+
 ---
 
 ## 12. Deploy Worker VMs
@@ -964,6 +987,12 @@ GCS_RESULT=$(curl -s -H "Metadata-Flavor: Google" \
   http://metadata.google.internal/computeMetadata/v1/instance/attributes/gcs_result_bucket)
 WORKER_ID="worker-$(hostname -s)"
 
+# Configure GCR credential helper.
+# Container-Optimized OS includes docker-credential-gcr but does not
+# auto-configure it for the Docker daemon. Without this step, Docker
+# cannot pull from gcr.io, causing workers to fail silently.
+docker-credential-gcr configure-docker --registries=gcr.io
+
 docker run -d --restart=unless-stopped --name sobel-worker \
   -e RABBITMQ_URL="amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@${RABBITMQ_HOST}:${RABBITMQ_PORT}/" \
   -e GCS_UPLOAD_BUCKET="${GCS_UPLOAD}" \
@@ -972,6 +1001,15 @@ docker run -d --restart=unless-stopped --name sobel-worker \
   gcr.io/${PROJECT_ID}/worker:latest
 SCRIPT
 ```
+
+> **Why GCR auth is required on COS**: Container-Optimized OS does not
+> automatically configure `docker-credential-gcr` even when the instance has
+> the `cloud-platform` scope. The `docker-credential-gcr configure-docker`
+> command adds the credential helper to `/root/.docker/config.json` so that
+> `docker pull` and `docker run` can authenticate against `gcr.io`. Without
+> this, Docker pull fails with authentication errors that are not visible
+> from outside the VM because startup script stdout is not streamed to the
+> serial console on COS.
 
 Then create the new template with all parameters matching
 `terraform/mig.tf` plus `rabbitmq_host`:

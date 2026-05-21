@@ -65,6 +65,14 @@ resource "google_compute_instance_template" "worker_template" {
       http://metadata.google.internal/computeMetadata/v1/instance/attributes/gcs_result_bucket)
     WORKER_ID="worker-$(hostname -s)"
 
+    # Configure GCR credential helper.
+    # COS has a read-only root filesystem, so /root/.docker cannot be created.
+    # /home/chronos/user is writable. We set HOME to that path so both
+    # docker-credential-gcr and docker run use the same config directory.
+    export HOME=/home/chronos/user
+    mkdir -p "$HOME/.docker"
+    docker-credential-gcr configure-docker --registries=gcr.io
+
     docker run -d --restart=unless-stopped --name sobel-worker \
       -e RABBITMQ_URL="amqp://$${RABBITMQ_USER}:$${RABBITMQ_PASSWORD}@$${RABBITMQ_HOST}:$${RABBITMQ_PORT}/" \
       -e GCS_UPLOAD_BUCKET="$${GCS_UPLOAD}" \
