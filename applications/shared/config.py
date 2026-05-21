@@ -30,17 +30,17 @@ class Settings:
     )
     rabbitmq_password: str = field(default_factory=lambda: _require_env("RABBITMQ_PASSWORD"))
 
-    # Redis
-    redis_host: str = field(default_factory=lambda: _require_env("REDIS_HOST"))
-    redis_port: int = field(default_factory=lambda: int(_require_env("REDIS_PORT")))
-    redis_db: int = field(default_factory=lambda: int(_require_env("REDIS_DB")))
-    redis_password: str = field(default_factory=lambda: _require_env("REDIS_PASSWORD"))
+    # Redis (optional for workers that don't need Redis)
+    redis_host: str = field(default_factory=lambda: os.environ.get("REDIS_HOST", "localhost"))
+    redis_port: int = field(default_factory=lambda: int(os.environ.get("REDIS_PORT", "6379")))
+    redis_db: int = field(default_factory=lambda: int(os.environ.get("REDIS_DB", "0")))
+    redis_password: str = field(default_factory=lambda: os.environ.get("REDIS_PASSWORD", ""))
 
     # GCS
     gcs_upload_bucket: str = field(default_factory=lambda: _require_env("GCS_UPLOAD_BUCKET"))
     gcs_result_bucket: str = field(default_factory=lambda: _require_env("GCS_RESULT_BUCKET"))
     gcs_service_account_key: str = field(
-        default_factory=lambda: _require_env("GCS_SERVICE_ACCOUNT_KEY")
+        default_factory=lambda: os.environ.get("GCS_SERVICE_ACCOUNT_KEY", "")
     )
 
     # Processing

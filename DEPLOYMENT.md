@@ -948,7 +948,29 @@ script and some metadata. However, the `rabbitmq_host` metadata field
 is currently **empty** — it must be populated with the RabbitMQ LB IP
 before any worker VM can start.
 
-### 12.2 Create a new instance template with the RabbitMQ host
+### 12.2 Grant Artifact Registry access to the worker SA
+
+**WHAT**: The worker VM needs permission to pull the Docker image from GCR
+(now backed by Artifact Registry).
+
+```bash
+gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
+  --member="serviceAccount:sobel-gcs-access@${PROJECT_ID}.iam.gserviceaccount.com" \
+  --role="roles/artifactregistry.reader"
+```
+
+### 12.3 Open RabbitMQ LoadBalancer source ranges
+
+**WHAT**: Worker VMs connected to the RabbitMQ LoadBalancer's external IP
+may have their source IP NAT'd to their external IP. If the LB restricts
+source ranges (e.g., `10.0.0.0/16`), they'll be blocked.
+
+```bash
+kubectl patch service rabbitmq-lb -n infra --type='json' \
+  -p='[{"op":"replace","path":"/spec/loadBalancerSourceRanges","value":["0.0.0.0/0"]}]'
+```
+
+### 12.4 Create a new instance template with the RabbitMQ host
 
 **WHAT**: Create a replacement instance template with `rabbitmq_host`
 set to the RabbitMQ LB IP. The startup script reads this metadata
@@ -959,8 +981,7 @@ one. A new template must be created with the correct metadata. Also,
 `--source-instance-template` flag; you must recreate the template
 using the same parameters Terraform used plus the new metadata value.
 
-First, create the worker startup script (extracted from
-`terraform/mig.tf`):
+First, create the worker startup script:
 
 ```bash
 cat > /tmp/worker-startup.sh << 'SCRIPT'
@@ -988,28 +1009,44 @@ GCS_RESULT=$(curl -s -H "Metadata-Flavor: Google" \
 WORKER_ID="worker-$(hostname -s)"
 
 # Configure GCR credential helper.
-# Container-Optimized OS includes docker-credential-gcr but does not
-# auto-configure it for the Docker daemon. Without this step, Docker
-# cannot pull from gcr.io, causing workers to fail silently.
+# COS has a read-only root filesystem, so /root/.docker cannot be created.
+# /home/chronos/user is writable. Set HOME to that path so both
+# docker-credential-gcr and docker run use the same config directory.
+export HOME=/home/chronos/user
+mkdir -p "$HOME/.docker"
 docker-credential-gcr configure-docker --registries=gcr.io
 
 docker run -d --restart=unless-stopped --name sobel-worker \
-  -e RABBITMQ_URL="amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@${RABBITMQ_HOST}:${RABBITMQ_PORT}/" \
+  -e RABBITMQ_HOST="${RABBITMQ_HOST}" \
+  -e RABBITMQ_PORT="${RABBITMQ_PORT}" \
+  -e RABBITMQ_VHOST="/" \
+  -e RABBITMQ_DEFAULT_USER="${RABBITMQ_USER}" \
+  -e RABBITMQ_PASSWORD="${RABBITMQ_PASSWORD}" \
   -e GCS_UPLOAD_BUCKET="${GCS_UPLOAD}" \
   -e GCS_RESULT_BUCKET="${GCS_RESULT}" \
+  -e FRAGMENT_GRID_SIZE="4" \
+  -e FRAGMENT_TTL_MS="600000" \
+  -e MAX_RETRIES="3" \
+  -e LOG_LEVEL="INFO" \
   -e WORKER_ID="${WORKER_ID}" \
   gcr.io/${PROJECT_ID}/worker:latest
 SCRIPT
 ```
 
-> **Why GCR auth is required on COS**: Container-Optimized OS does not
-> automatically configure `docker-credential-gcr` even when the instance has
-> the `cloud-platform` scope. The `docker-credential-gcr configure-docker`
-> command adds the credential helper to `/root/.docker/config.json` so that
-> `docker pull` and `docker run` can authenticate against `gcr.io`. Without
-> this, Docker pull fails with authentication errors that are not visible
-> from outside the VM because startup script stdout is not streamed to the
-> serial console on COS.
+> **Why GCR auth requires `HOME` on COS**: Container-Optimized OS has a
+> read-only root filesystem. `docker-credential-gcr configure-docker` tries
+> to write `/root/.docker/config.json` which fails with
+> `mkdir /root/.docker: read-only file system`. Setting `HOME=/home/chronos/user`
+> before running the command allows it to write to a writable directory.
+> Also ensure the worker service account has `roles/artifactregistry.reader`
+> on the project (GCR is now backed by Artifact Registry).
+>
+> **Why individual env vars**: The application code reads
+> `RABBITMQ_HOST`, `RABBITMQ_PORT`, `RABBITMQ_VHOST`, `RABBITMQ_DEFAULT_USER`,
+> and `RABBITMQ_PASSWORD` separately (not a single `RABBITMQ_URL`). All other
+> required vars (`FRAGMENT_GRID_SIZE`, `FRAGMENT_TTL_MS`, `MAX_RETRIES`,
+> `LOG_LEVEL`) must also be passed explicitly. Missing any causes the worker
+> to crash on startup with `KeyError`.
 
 Then create the new template with all parameters matching
 `terraform/mig.tf` plus `rabbitmq_host`:
@@ -1034,7 +1071,7 @@ gcloud compute instance-templates create "${NEW_TEMPLATE}" \
 echo "Created template: ${NEW_TEMPLATE}"
 ```
 
-### 12.3 Roll the MIG to use the new template
+### 12.5 Roll the MIG to use the new template
 
 **WHAT**: Tell the MIG to use the new template with the correct
 RabbitMQ host. Since `target_size` is 0, no VMs are created yet.
@@ -1052,7 +1089,7 @@ gcloud compute instance-groups managed rolling-action start-update \
   --max-unavailable=1
 ```
 
-### 12.4 Verify the MIG status
+### 12.6 Verify the MIG status
 
 ```bash
 gcloud compute instance-groups managed list

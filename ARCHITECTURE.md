@@ -20,9 +20,15 @@
 
 ### 1.3 Worker VM Strategy: Managed Instance Group (MIG)
 
-**Decision**: Workers run as Compute Engine VMs in a regional MIG. Scaling is driven by a custom Cloud Monitoring metric derived from RabbitMQ queue depth. A `worker-autoscaler` service (Kubernetes Deployment) polls queue depth and adjusts MIG target size.
+**Decision**: Workers run as Compute Engine VMs in a regional MIG (pinned to `us-central1-b`). Scaling is driven by a `worker-autoscaler` (Kubernetes Deployment) that polls RabbitMQ's management API (`GET /api/queues/%2f/fragments.pending`) every 30s and calls `instanceGroupManagers.resize` on the MIG. Worker VMs use Container-Optimized OS (COS) with a Docker-based startup script.
 
-**Reasoning**: MIG provides automatic VM replacement on failure, zonal distribution, and programmatic scaling without Terraform state drift. The custom-metric autoscaler demonstrates cross-service orchestration.
+**Current limit**: GCP free-tier CPU quota (12 vCPUs) with 6 used by GKE leaves ~6 for workers. Practical max is 2 workers (4 CPUs); 1 is sufficient for testing.
+
+**Reasoning**: MIG provides automatic VM replacement on failure, zonal distribution, and programmatic scaling without Terraform state drift. The RabbitMQ-API-driven autoscaler demonstrates cross-service orchestration without depending on Cloud Monitoring metrics.
+
+**Worker VM startup**: COS has a read-only root filesystem. The startup script must set `HOME=/home/chronos/user` before running `docker-credential-gcr`, otherwise `mkdir /root/.docker` fails. The worker service account also needs `roles/artifactregistry.reader` (GCR is now backed by Artifact Registry).
+
+**RabbitMQ connectivity**: Worker VMs with external IPs connecting to the RabbitMQ LoadBalancer's public IP may have their source IP NAT'd to their external IP. If the LB has `loadBalancerSourceRanges` restricted to the VPC subnet (e.g., `10.0.0.0/16`), the traffic is blocked because the source IP seen by the firewall is the VM's external IP, not its internal one. The fix is to open source ranges to `0.0.0.0/0`.
 
 **Alternative dismissed**: Terraform apply/destroy per scale event is slow (30-60s), creates state drift, and is not how production systems scale compute. Kubernetes Jobs for workers would be simpler but violates the explicit requirement for external VMs.
 
@@ -30,15 +36,15 @@
 
 **Decision**: Five exchanges with specific exchange/queue/binding topology:
 
-| Exchange | Type | Purpose |
-|---|---|---|
-| `sobel.images` | direct | Routes new-image events to the split service |
-| `sobel.fragments` | direct | Routes fragment tasks to workers (round-robin by routing key) |
-| `sobel.fragments.dlx` | direct | Dead Letter Exchange for timed-out or rejected fragment tasks |
-| `sobel.results` | fanout | Broadcasts completed fragments to both joiner and frontend |
-| `sobel.final` | direct | Routes final image-completion events to the backend |
+| Exchange | Type | Queues bound | Purpose |
+|---|---|---|---|---|
+| `sobel.images` | direct | `images.new` | Routes new-image events to the split service |
+| `sobel.fragments` | direct | `fragments.pending` (DLX: `sobel.fragments.dlx`, TTL: 600s) | Routes fragment tasks to workers (round-robin by routing key). Expired or NACKed messages flow to DLQ. |
+| `sobel.fragments.dlx` | direct | `fragments.dead` | Dead Letter Exchange for timed-out or rejected fragment tasks. Consumed by dlq-monitor for retry. |
+| `sobel.results` | fanout | `results.joiner`, `results.dashboard` | Broadcasts completed fragments to both joiner (assembly) and frontend (SSE progress). |
+| `sobel.final` | direct | `images.completed` | Routes final image-completion events to the backend for Redis status update. |
 
-**Reasoning**: Direct exchanges give targeted routing (one producer, one consumer type). Fanout for results ensures the joiner and frontend both receive every fragment completion without coupling their consumption rates. Each exchange has a clean semantic boundary, making topology easier to debug and extend.
+**Reasoning**: Direct exchanges give targeted routing — `images.new` → split, `fragments.pending` → workers, `fragments.dead` → dlq-monitor, `images.completed` → backend. Fanout for results ensures both joiner (`results.joiner`) and frontend (`results.dashboard`) receive every fragment completion without coupling their consumption rates. The `fragments.pending` queue carries a 600-second TTL and a Dead Letter Exchange binding so that expired or rejected fragments are routed to the DLQ monitor for retry rather than silently lost. Each exchange has a clean semantic boundary, making topology easier to debug and extend.
 
 **Alternative dismissed**: Single exchange with routing keys only creates entangled routing logic where normal traffic and DLX/retry traffic share the same namespace. Google Pub/Sub is fully managed but the course requires RabbitMQ specifically.
 
@@ -189,21 +195,30 @@ TTL: 1 hour after image completion (auto-cleanup).
       +----------+
 ```
 
+> **Deployment**: The live system runs in GCP project `sobel-processing-nicodigo5`,
+> single-zone `us-central1-b`. Kubernetes namespaces: `infra` (RabbitMQ, Redis)
+> and `apps` (all application Deployments). Worker VMs connect to RabbitMQ via
+> the LoadBalancer's external IP (`35.232.148.196:5672`) — the LB source ranges
+> must include `0.0.0.0/0` because worker VM traffic to the LB's public IP may
+> be source-NAT'd to their external IPs, which fall outside the VPC subnet range.
+
 ---
 
 ## 3. System Components
 
 | Component | Type | Replicas (min-max) | Ports | Dependencies |
 |---|---|---|---|---|
-| Frontend | Deployment | 2-4 | 80 (HTTP) | Backend, RabbitMQ (fanout queue) |
-| Backend | Deployment | 2-8 | 8000 (HTTP) | RabbitMQ, Redis, GCS |
-| Split | Deployment | 1-4 | 8000 (HTTP, admin) | RabbitMQ, GCS, Redis |
-| Joiner | Deployment | 1-4 | 8000 (HTTP, admin) | RabbitMQ, Redis, GCS |
-| Worker | MIG (external) | 0-10 | N/A (consumer only) | RabbitMQ, GCS |
-| DLQ Monitor | Deployment | 1 | 8000 (HTTP, admin) | RabbitMQ |
-| Worker Autoscaler | Deployment | 1 | N/A | RabbitMQ mgmt API, Compute Engine API |
-| RabbitMQ | StatefulSet | 1 | 5672 (AMQP), 15672 (mgmt) | PVC (10Gi) |
+| Frontend | Deployment | 2-4 | 80 (HTTP) | Backend, RabbitMQ (`results.dashboard`) |
+| Backend | Deployment | 2-8 | 8000 (HTTP) | RabbitMQ (`images.completed`), Redis, GCS |
+| Split | Deployment | 1-4 | 8000 (HTTP, admin) | RabbitMQ (`images.new`), GCS, Redis |
+| Joiner | Deployment | 1-4 | 8000 (HTTP, admin) | RabbitMQ (`results.joiner`), Redis, GCS |
+| Worker | MIG (external) | 0-2† | N/A (consumer only) | RabbitMQ (`fragments.pending`), GCS (reads from upload bucket, writes to result bucket) |
+| DLQ Monitor | Deployment | 1 | 8000 (HTTP, admin) | RabbitMQ (`fragments.dead`) |
+| Worker Autoscaler | Deployment | 1 | N/A | RabbitMQ mgmt API (`GET /api/queues/.../fragments.pending`), Compute Engine MIG API |
+| RabbitMQ | StatefulSet | 1 | 5672 (AMQP), 15672 (mgmt), 31179 (NodePort) | PVC (10Gi), LoadBalancer for external worker access |
 | Redis | StatefulSet | 1 | 6379 | PVC (5Gi) |
+
+† Worker max is 2 under current 12-CPU GCP free-tier quota (6 GKE + 4 workers = 10 ≤ 12, but transient accounting may push it to the limit).
 
 ### Component Responsibilities
 
@@ -213,13 +228,13 @@ TTL: 1 hour after image completion (auto-cleanup).
 
 - **Split**: Consumes `image.new` from `sobel.images`. Downloads the original PNG from GCS. Uses Pillow to split into a 4x4 grid (16 fragments). Publishes one `fragment.task` message to `sobel.fragments` per fragment. Writes image metadata to Redis.
 
-- **Joiner**: Consumes `fragment.result` messages from `sobel.results` via its anonymous queue bound to the fanout. Adds each completed fragment ID to the Redis set for its image. When the set reaches cardinality 16, downloads all fragments from GCS, reassembles them using Pillow, uploads the final result to GCS, and publishes `image.completed` to `sobel.final`.
+- **Joiner**: Consumes `fragment.result` messages from `sobel.results` via its queue bound to the fanout. Adds each completed fragment ID to the Redis set for its image. Extracts fragment dimensions (`width`, `height`) from the result payload to calculate the correct assembly canvas size. When the set reaches cardinality 16, downloads all fragment results from GCS, reassembles them using Pillow, uploads the final result to GCS, and publishes `image.completed` to `sobel.final`.
 
-- **Worker**: Runs on Compute Engine VMs. Connects to RabbitMQ, consumes from `fragments.pending`, downloads the fragment from GCS, applies the Sobel filter using `scipy.ndimage.sobel`, uploads the result back to GCS, and publishes `fragment.result` to `sobel.results`. Uses publisher confirms. Handles errors by NACKing without requeue (message flows to DLX).
+- **Worker**: Runs on Compute Engine VMs (Container-Optimized OS + Docker). Connects to RabbitMQ via the LoadBalancer external IP, consumes from `fragments.pending`, downloads the fragment from GCS (using Application Default Credentials — no service account key file needed on GCE), applies the Sobel filter using `scipy.ndimage.sobel`, uploads the result back to GCS, and publishes `fragment.result` to `sobel.results`. The result message includes the actual fragment pixel dimensions (`width`, `height`) so the Joiner can correctly size the assembly canvas. Handles errors by NACKing without requeue (message flows to DLX).
 
 - **DLQ Monitor**: Consumes from `fragments.dead` (DLX queue). Inspects `x-death` header. On retry <= 3, republishes to `sobel.fragments` with configurable delay. On retry >= 3, logs permanent failure and publishes an error notification.
 
-- **Worker Autoscaler**: Polls the RabbitMQ management API (`GET /api/queues/%2f/fragments.pending`) every 30 seconds. Calculates target MIG size: `ceil(messages_ready / WORKER_FRAGMENT_CAPACITY)`, clamped to [0, MAX_WORKERS]. Calls Compute Engine API `instanceGroupManagers.resize` on the MIG.
+- **Worker Autoscaler**: Polls the RabbitMQ management API (`GET /api/queues/%2f/fragments.pending`) every 30 seconds. Counts `messages_ready` (not total messages — ignores unacknowledged). Calculates target MIG size: `ceil(messages_ready / WORKER_FRAGMENT_CAPACITY)`, clamped to [0, MAX_WORKERS]. Calls Compute Engine API `instanceGroupManagers.resize` on the MIG with a 180-second cooldown between mutations. Counts actual running instances via `list_managed_instances` (not `get()` which returns configured target_size).
 
 ---
 
@@ -275,10 +290,11 @@ Summary:
 ### Worker Scaling (MIG)
 
 - `worker-autoscaler` polls RabbitMQ every 30s
-- Target size = `max(0, min(MAX_WORKERS, ceil(queued_fragments / 8)))`
+- Target size = `max(0, min(MAX_WORKERS, ceil(messages_ready / 8)))`
 - Default MAX_WORKERS = 10, WORKER_FRAGMENT_CAPACITY = 8
 - Minimum workers = 0 (scale to zero)
-- Scaling cooldown: 60 seconds between resize calls
+- Scaling cooldown: 180 seconds between resize calls
+- **Current practical limit**: 2 workers under GCP 12-CPU free-tier quota
 
 ### Cluster Autoscaling (GKE)
 

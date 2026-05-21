@@ -11,12 +11,15 @@ Runs as a plain Python asyncio process (asyncio.run(main())).
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import logging
 import socket
 import time
 from datetime import datetime, timezone
 from typing import Any
+
+from PIL import Image
 
 import aio_pika
 
@@ -66,6 +69,8 @@ async def main() -> None:
             gcs_path: str = payload["gcs_path"]
             row: int = payload["row"]
             col: int = payload["col"]
+            frag_width: int = payload.get("width", 0)
+            frag_height: int = payload.get("height", 0)
 
             # 1. Download fragment from GCS
             bucket, blob_name = _parse_gcs_uri(gcs_path)
@@ -94,12 +99,18 @@ async def main() -> None:
             processing_time_ms = int((time.monotonic() - start_time) * 1000)
             now = datetime.now(timezone.utc).isoformat()
 
+            # Determine actual output dimensions from the sobel result
+            result_img = Image.open(io.BytesIO(result_bytes))
+            out_width, out_height = result_img.size
+
             result_msg: dict[str, Any] = {
                 "image_id": image_id,
                 "fragment_id": fragment_id,
                 "row": row,
                 "col": col,
                 "gcs_path": result_gcs_path,
+                "width": out_width,
+                "height": out_height,
                 "status": "success",
                 "error": None,
                 "processing_time_ms": processing_time_ms,

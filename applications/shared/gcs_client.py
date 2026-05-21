@@ -50,10 +50,17 @@ class GCSClient:
         key_json = self._settings.gcs_service_account_key
 
         if not key_json or key_json.strip() in ("", "{}"):
-            self._local_root = LOCAL_ROOT
-            self._local_root.mkdir(parents=True, exist_ok=True)
-            logger.warning("GCS credentials empty — using local storage at %s",
-                           self._local_root)
+            # Running on GCE with Application Default Credentials — just use them.
+            # The service account attached to the VM should have the needed
+            # permissions; we don't pre-verify because bucket-level checks
+            # require extra IAM roles the SA may not have.
+            def _init_adc() -> storage.Client:
+                return storage.Client()
+
+            self._client = await asyncio.to_thread(_init_adc)
+            logger.info("GCS client initialized via ADC (upload=%s, result=%s)",
+                        self._settings.gcs_upload_bucket,
+                        self._settings.gcs_result_bucket)
             return
 
         def _init() -> storage.Client:
